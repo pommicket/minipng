@@ -25,6 +25,8 @@ pub enum Error<I: IOError> {
 	BadFilter,
 	BadPlteChunk,
 	BadTrnsChunk,
+	BadNlen,
+	NoIdat,
 }
 
 impl<I: IOError> From<I> for Error<I> {
@@ -56,6 +58,8 @@ impl<I: IOError> Display for Error<I> {
 			Self::BadFilter => write!(f, "bad PNG filter"),
 			Self::BadPlteChunk => write!(f, "bad PLTE chunk"),
 			Self::BadTrnsChunk => write!(f, "bad tRNS chunk"),
+			Self::NoIdat => write!(f, "missing IDAT chunk"),
+			Self::BadNlen => write!(f, "LEN doesn't match NLEN"),
 		}
 	}
 }
@@ -122,29 +126,56 @@ impl<'a> Read for &'a [u8] {
 	}
 }
 
-struct BlockReader<'a, R: Read> {
+struct IdatReader<'a, R: Read> {
 	inner: &'a mut R,
-	bytes_left: usize,
+	bytes_left_in_block: usize,
+	palette: &'a mut [[u8; 4]; 256],
+	header: &'a ImageHeader,
 }
 
-impl<R: Read> BlockReader<'_, R> {
-	fn read(&mut self, buf: &mut [u8]) -> Result<(), Error<R::Error>> {
-		if buf.len() > self.bytes_left {
-			return Err(Error::UnexpectedEob);
+impl<R: Read> IdatReader<'_, R> {
+	fn read_partial(&mut self, buf: &mut [u8]) -> Result<usize, Error<R::Error>> {
+		if self.bytes_left_in_block >= buf.len() {
+			self.inner.read(buf)?;
+			self.bytes_left_in_block -= buf.len();
+			Ok(buf.len())
+		} else {
+			if self.bytes_left_in_block > 0 {
+				self.inner.read(&mut buf[..self.bytes_left_in_block])?;
+			}
+			let bytes_read = self.bytes_left_in_block;
+
+			// CRC
+			self.inner.skip_bytes(4)?;
+			match read_non_idat_chunks(self.inner, self.header, self.palette)? {
+				None => Ok(bytes_read),
+				Some(n) => {
+					self.bytes_left_in_block = n;
+					Ok(self.read_partial(&mut buf[bytes_read..])? + bytes_read)
+				}
+			}
 		}
-		self.inner.read(buf)?;
-		self.bytes_left -= buf.len();
-		Ok(())
 	}
 
-	fn read_partial(&mut self, buf: &mut [u8]) -> Result<usize, Error<R::Error>> {
-		let count = min(self.bytes_left, buf.len());
-		self.read(&mut buf[..count])?;
-		Ok(count)
+	fn read(&mut self, buf: &mut [u8]) -> Result<(), Error<R::Error>> {
+		let count = self.read_partial(buf)?;
+		if count == buf.len() {
+			Ok(())
+		} else {
+			Err(Error::UnexpectedEob)
+		}
 	}
 
 	fn read_to_end(&mut self) -> Result<(), Error<R::Error>> {
-		self.inner.skip_bytes(self.bytes_left)?;
+		self.inner.skip_bytes(self.bytes_left_in_block)?;
+		// CRC
+		self.inner.skip_bytes(4)?;
+		loop {
+			match read_non_idat_chunks(self.inner, self.header, self.palette)? {
+				None => break,
+				Some(n) => self.inner.skip_bytes(n + 4)?,
+			}
+		}
 		Ok(())
 	}
 }
@@ -224,7 +255,7 @@ impl ImageHeader {
 	pub fn color_type(&self) -> ColorType {
 		self.color_type
 	}
-	fn checked_required_bytes(&self) -> Option<usize> {
+	fn checked_decompressed_size(&self) -> Option<usize> {
 		let row_bytes = 1 + usize::try_from(self.width())
 			.ok()?
 			.checked_mul(usize::from(self.bit_depth() as u8))?
@@ -233,9 +264,18 @@ impl ImageHeader {
 			/ 8;
 		row_bytes.checked_mul(usize::try_from(self.height()).ok()?)
 	}
+
+	fn decompressed_size(&self) -> usize {
+		self.checked_decompressed_size().unwrap()
+	}
+
+	fn checked_required_bytes(&self) -> Option<usize> {
+		self.checked_decompressed_size()
+	}
 	pub fn required_bytes(&self) -> usize {
 		self.checked_required_bytes().unwrap()
 	}
+
 	pub fn bytes_per_scanline(&self) -> usize {
 		(self.width() as usize
 			* usize::from(self.bit_depth() as u8)
@@ -249,20 +289,18 @@ impl ImageHeader {
 }
 
 /// number of bits to read in each [`Read::read`] call.
-///
-/// don't change this to something bigger than `u32`, since we don't want to overread past the zlib checksum.
 type ReadBits = u32;
 /// number of bits to store in the [`BitReader`] buffer.
 type Bits = u64;
 
 struct BitReader<'a, R: Read> {
-	inner: BlockReader<'a, R>,
+	inner: IdatReader<'a, R>,
 	bits: Bits,
 	bits_left: u8,
 }
 
-impl<'a, R: Read> From<BlockReader<'a, R>> for BitReader<'a, R> {
-	fn from(inner: BlockReader<'a, R>) -> Self {
+impl<'a, R: Read> From<IdatReader<'a, R>> for BitReader<'a, R> {
+	fn from(inner: IdatReader<'a, R>) -> Self {
 		Self {
 			inner,
 			bits: 0,
@@ -312,6 +350,16 @@ impl<R: Read> BitReader<'_, R> {
 	fn read_bits_u16(&mut self, count: u8) -> Result<u16, Error<R::Error>> {
 		debug_assert!(count <= 16);
 		self.read_bits(count).map(|x| x as u16)
+	}
+
+	fn read_aligned_bytes(&mut self, buf: &mut [u8]) -> Result<(), Error<R::Error>> {
+		debug_assert_eq!(self.bits_left % 8, 0);
+		let mut i = 0;
+		while self.bits_left > 0 && i < buf.len() {
+			buf[i] = self.read_bits_u8(8)?;
+			i += 1;
+		}
+		self.inner.read(&mut buf[i..])
 	}
 }
 
@@ -435,12 +483,14 @@ impl HuffmanTable {
 		} else {
 			// put it in a subtable.
 			let main_table_entry = usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1);
-			let mut subtable_index = self.main_table[main_table_entry] & 0x1ff;
-			if subtable_index == 0 {
-				subtable_index = self.subtables_used;
-				self.main_table[main_table_entry] = 0x200 | subtable_index;
+			let subtable_index = if self.main_table[main_table_entry] == 0 {
+				let i = self.subtables_used;
+				self.main_table[main_table_entry] = 0x200 | i;
 				self.subtables_used += 1;
-			}
+				i
+			} else {
+				self.main_table[main_table_entry] & 0x1ff
+			};
 			let subtable = &mut self.subtables[usize::from(subtable_index)];
 			for i in 0..1u16 << (HUFFMAN_MAX_BITS - length) {
 				subtable[usize::from(
@@ -517,10 +567,10 @@ fn read_compressed_block<R: Read>(
 				i += 1;
 			} else if op == 16 {
 				let rep = reader.read_bits_usize(2)? + 3;
-				if i + rep > total_code_lengths {
+				if i == 0 || i + rep > total_code_lengths {
 					return Err(Error::BadHuffmanCodes);
 				}
-				let l = code_lengths[i];
+				let l = code_lengths[i - 1];
 				for _ in 0..rep {
 					code_lengths[i] = l;
 					i += 1;
@@ -550,11 +600,9 @@ fn read_compressed_block<R: Read>(
 				break;
 			}
 		}
-
 		let literal_length_code_lengths = &code_lengths[0..literal_length_code_lengths_count];
 		let distance_code_lengths =
 			&code_lengths[literal_length_code_lengths_count..total_code_lengths];
-
 		literal_length_table = HuffmanTable::from_code_lengths(literal_length_code_lengths);
 		distance_table = HuffmanTable::from_code_lengths(distance_code_lengths);
 	} else {
@@ -584,17 +632,14 @@ fn read_compressed_block<R: Read>(
 		match literal_length {
 			0..=255 => {
 				// literal
-				//println!("lit {literal_length}");
 				writer.write_byte(literal_length as u8)?;
 			}
 			256 => {
 				// end of block
-				//println!("eob");
 				break;
 			}
 			_ => {
 				// length + distance
-				//println!("{literal_length}");
 				let length = match literal_length {
 					257..=264 => literal_length - 254,
 					265..=284 => {
@@ -626,7 +671,6 @@ fn read_compressed_block<R: Read>(
 					}
 					_ => return Err(Error::BadCode),
 				};
-				//println!("D {distance} L {length}");
 				writer.copy(usize::from(distance), usize::from(length))?;
 			}
 		}
@@ -635,24 +679,30 @@ fn read_compressed_block<R: Read>(
 }
 
 fn read_idat<R: Read>(
-	mut reader: BlockReader<'_, R>,
+	reader: IdatReader<'_, R>,
 	writer: &mut DecompressedDataWriter,
 ) -> Result<(), Error<R::Error>> {
-	let mut zlib_header = [0; 2];
-	reader.read(&mut zlib_header)?;
-
 	let mut reader = BitReader::from(reader);
-	loop {
+	let _zlib_header = reader.read_bits(16);
+	let decompressed_size = reader.inner.header.decompressed_size();
+	while writer.pos < decompressed_size {
 		let bfinal = reader.read_bits(1)?;
 		let btype = reader.read_bits(2)?;
 		if btype == 0 {
 			// uncompressed block
-			let len = reader.read_bits_usize(16)?;
-			reader.read_bits(16)?; // nlen
-			if writer.slice.len() < len {
+			reader.bits >>= reader.bits_left % 8;
+			reader.bits_left -= reader.bits_left % 8;
+			let len = reader.read_bits_u16(16)?;
+			let nlen = reader.read_bits_u16(16)?;
+			if len ^ nlen != 0xffff {
+				return Err(Error::BadNlen);
+			}
+			let len: usize = len.into();
+			if len > writer.slice.len() - writer.pos {
 				return Err(Error::TooMuchData);
 			}
-			reader.inner.read(&mut writer.slice[..len])?;
+			reader.read_aligned_bytes(&mut writer.slice[writer.pos..writer.pos + len])?;
+			writer.pos += len;
 		} else if btype == 1 || btype == 2 {
 			// compressed block
 			read_compressed_block(&mut reader, writer, btype == 2)?;
@@ -761,17 +811,11 @@ impl ImageData<'_> {
 	}
 }
 
-pub fn read_png<'a, R: Read>(
+fn read_non_idat_chunks<R: Read>(
 	reader: &mut R,
-	header: Option<&ImageHeader>,
-	buf: &'a mut [u8],
-) -> Result<ImageData<'a>, Error<R::Error>> {
-	let header = match header {
-		None => read_png_header(reader)?,
-		Some(h) => *h,
-	};
-	let mut writer = DecompressedDataWriter::from(buf);
-	let mut palette = [[0, 0, 0, 0]; 256];
+	header: &ImageHeader,
+	palette: &mut [[u8; 4]; 256],
+) -> Result<Option<usize>, Error<R::Error>> {
 	loop {
 		let mut chunk_header = [0; 8];
 		reader.read(&mut chunk_header[..])?;
@@ -790,13 +834,7 @@ pub fn read_png<'a, R: Read>(
 		if &chunk_type == b"IEND" {
 			break;
 		} else if &chunk_type == b"IDAT" {
-			read_idat(
-				BlockReader {
-					inner: reader,
-					bytes_left: chunk_len + 4,
-				},
-				&mut writer,
-			)?;
+			return Ok(Some(chunk_len));
 		} else if &chunk_type == b"PLTE" && header.color_type == ColorType::Indexed {
 			if chunk_len > 256 * 3 || chunk_len % 3 != 0 {
 				return Err(Error::BadPlteChunk);
@@ -827,6 +865,33 @@ pub fn read_png<'a, R: Read>(
 			return Err(Error::UnrecognizedChunk(chunk_type));
 		}
 	}
+	Ok(None)
+}
+
+pub fn read_png<'a, R: Read>(
+	reader: &mut R,
+	header: Option<&ImageHeader>,
+	buf: &'a mut [u8],
+) -> Result<ImageData<'a>, Error<R::Error>> {
+	let header = match header {
+		None => read_png_header(reader)?,
+		Some(h) => *h,
+	};
+	let mut writer = DecompressedDataWriter::from(buf);
+	let mut palette = [[0, 0, 0, 0]; 256];
+	let Some(idat_len) = read_non_idat_chunks(reader, &header, &mut palette)? else {
+		return Err(Error::NoIdat);
+	};
+	read_idat(
+		IdatReader {
+			inner: reader,
+			bytes_left_in_block: idat_len,
+			header: &header,
+			palette: &mut palette,
+		},
+		&mut writer,
+	)?;
+
 	let buf = writer.slice;
 	apply_filters(&header, buf)?;
 	Ok(ImageData {
