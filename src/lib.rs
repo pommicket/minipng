@@ -786,13 +786,13 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 #[derive(Debug)]
 pub struct ImageData<'a> {
 	header: ImageHeader,
-	pixels: &'a [u8],
+	buffer: &'a mut [u8],
 	palette: [[u8; 4]; 256],
 }
 
 impl ImageData<'_> {
 	pub fn pixels(&self) -> &[u8] {
-		self.pixels
+		&self.buffer[..self.header.data_size()]
 	}
 	pub fn palette(&self) -> &[[u8; 4]] {
 		&self.palette[..]
@@ -832,6 +832,7 @@ fn read_non_idat_chunks<R: Read>(
 			chunk_header[7],
 		];
 		if &chunk_type == b"IEND" {
+			reader.skip_bytes(4)?; // CRC
 			break;
 		} else if &chunk_type == b"IDAT" {
 			return Ok(Some(chunk_len));
@@ -895,7 +896,7 @@ pub fn read_png<'a, R: Read>(
 	let buf = writer.slice;
 	apply_filters(&header, buf)?;
 	Ok(ImageData {
-		pixels: &buf[..header.data_size()],
+		buffer: buf,
 		header,
 		palette,
 	})
@@ -917,9 +918,8 @@ mod tests {
 		let mut r = std::io::BufReader::new(File::open(path).expect("file not found"));
 		let tiny_header = read_png_header(&mut r).unwrap();
 		let mut tiny_buf = vec![0; tiny_header.required_bytes()];
-		let tiny_bytes = read_png(&mut r, Some(&tiny_header), &mut tiny_buf)
-			.unwrap()
-			.pixels;
+		let image = read_png(&mut r, Some(&tiny_header), &mut tiny_buf).unwrap();
+		let tiny_bytes = image.pixels();
 
 		assert_eq!(png_bytes.len(), tiny_bytes.len());
 		assert_eq!(png_bytes, tiny_bytes);
@@ -935,9 +935,8 @@ mod tests {
 
 		let tiny_header = read_png_header(&mut bytes).unwrap();
 		let mut tiny_buf = vec![0; tiny_header.required_bytes()];
-		let tiny_bytes = read_png(&mut bytes, Some(&tiny_header), &mut tiny_buf)
-			.unwrap()
-			.pixels;
+		let image = read_png(&mut bytes, Some(&tiny_header), &mut tiny_buf).unwrap();
+		let tiny_bytes = image.pixels();
 
 		assert_eq!(png_bytes.len(), tiny_bytes.len());
 		assert_eq!(png_bytes, tiny_bytes);
@@ -952,7 +951,7 @@ mod tests {
 
 	#[test]
 	fn test_small() {
-		test_both!("examples/small.png");
+		test_both!("test/small.png");
 	}
 	#[test]
 	fn test_small_rgb() {
@@ -963,6 +962,10 @@ mod tests {
 		test_both!("test/small_rgba.png");
 	}
 	#[test]
+	fn test_gray_alpha() {
+		test_both!("test/gray_alpha.png");
+	}
+	#[test]
 	fn test_earth0() {
 		test_both!("test/earth0.png");
 	}
@@ -971,7 +974,71 @@ mod tests {
 		test_both!("test/earth9.png");
 	}
 	#[test]
+	fn test_photograph() {
+		test_both!("test/photograph.png");
+	}
+	#[test]
 	fn test_earth_palette() {
 		test_both!("test/earth_palette.png");
+	}
+	#[test]
+	fn test_württemberg() {
+		test_both!("test/württemberg.png");
+	}
+	#[test]
+	fn test_endsleigh() {
+		test_both!("test/endsleigh.png");
+	}
+	#[test]
+	fn test_1qps() {
+		test_both!("test/1QPS.png");
+	}
+	#[test]
+	fn test_rabbit() {
+		test_both!("test/rabbit.png");
+	}
+	#[test]
+	fn test_basketball() {
+		test_both!("test/basketball.png");
+	}
+	#[test]
+	fn test_triangle() {
+		test_both!("test/triangle.png");
+	}
+	#[test]
+	fn test_iroquois() {
+		test_both!("test/iroquois.png");
+	}
+	#[test]
+	fn test_canada() {
+		test_both!("test/canada.png");
+	}
+	#[test]
+	fn test_berry() {
+		test_both!("test/berry.png");
+	}
+	#[test]
+	fn test_adam() {
+		test_both!("test/adam.png");
+	}
+	#[test]
+	fn test_nightingale() {
+		test_both!("test/nightingale.png");
+	}
+	#[test]
+	fn test_ratatoskr() {
+		test_both!("test/ratatoskr.png");
+	}
+	#[test]
+	fn test_cheerios() {
+		test_both!("test/cheerios.png");
+	}
+	#[test]
+	fn test_cavendish() {
+		test_both!("test/cavendish.png");
+	}
+	#[test]
+	fn test_ouroboros() {
+		test_both!("test/ouroboros.png");
 	}
 }
