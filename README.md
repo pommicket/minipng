@@ -8,6 +8,7 @@ This decoder can be used without `std` or `alloc` by disabling the `std` feature
 
 - Correctly decode all non-interlaced PNG files (if a non-interlaced PNG is decoded incorrectly, please report it as a bug)
 - Small code size
+- No dependencies other than `core`.
 - No panics (if any function panics, please report it as a bug).
 - No unsafe code
 

@@ -1,33 +1,66 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-
+//#![deny(missing_docs)] // TODO
+/// # tiny-png
+///
+/// tiny PNG decoder with no dependencies
+///
+/// see README.md for usage.
 use core::cmp::{max, min};
 use core::fmt::{self, Debug, Display};
 
+/// trait for IO errors
+///
+/// we don't use [`std::io::Error`]
+/// so that this crate can be used in `no_std` environments.
 pub trait IOError: Sized + Display + Debug {}
 impl<T: Sized + Display + Debug> IOError for T {}
 
+/// decoding error
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error<I: IOError> {
+	/// IO error — these can only be produced
+	/// by the underlying file/slice reader, not by
+	/// `tiny-png` itself.
 	IO(I),
+	/// the buffer you provided is too small
+	/// (i.e. it's smaller than [`ImageHeader::required_bytes()`]).
 	BufferTooSmall,
+	/// this file is not a PNG file (missing PNG signature).
 	NotPng,
-	BadIhdr,
-	UnrecognizedChunk([u8; 4]),
-	BadBlockType,
+	/// the size of the image data would not fit in a `usize` (so it could never be loaded into memory)
 	TooLargeForUsize,
-	TooMuchData,
-	UnexpectedEob,
-	BadZlibHeader,
-	BadCode,
-	BadHuffmanCodes,
-	BadBackReference,
-	UnsupportedInterlace,
-	BadFilter,
-	BadPlteChunk,
-	BadTrnsChunk,
+	/// bad IHDR block (invalid PNG file)
+	BadIhdr,
+	/// unrecognized critical PNG chunk (invalid PNG file)
+	UnrecognizedChunk([u8; 4]),
+	/// bad ZLIB block type (invalid PNG file)
+	BadBlockType,
+	/// ZLIB LEN doesn't match NLEN (invalid PNG file)
 	BadNlen,
+	/// decompressed data is larger than it should be (invalid PNG file)
+	TooMuchData,
+	/// unexpected end of PNG block (invalid PNG file)
+	UnexpectedEob,
+	/// bad zlib header (invalid PNG file)
+	BadZlibHeader,
+	/// bad huffman code (invalid PNG file)
+	BadCode,
+	/// bad huffman dictionary definition (invalid PNG file)
+	BadHuffmanDict,
+	/// bad LZ77 back reference (invalid PNG file)
+	BadBackReference,
+	/// unsupported interlace method (Adam7 interlacing is not currently supported)
+	UnsupportedInterlace,
+	/// bad filter number (invalid PNG file)
+	BadFilter,
+	/// bad PLTE chunk (invalid PNG file)
+	BadPlteChunk,
+	/// bad tRNS chunk (invalid PNG file)
+	BadTrnsChunk,
+	/// missing IDAT chunk (invalid PNG file)
 	NoIdat,
+	/// Adler-32 checksum doesn't check out (invalid PNG file)
 	BadAdlerChecksum,
 }
 
@@ -52,7 +85,7 @@ impl<I: IOError> Display for Error<I> {
 			Self::UnexpectedEob => write!(f, "unexpected end of block"),
 			Self::BadZlibHeader => write!(f, "bad zlib header"),
 			Self::BadCode => write!(f, "bad code in DEFLATE data"),
-			Self::BadHuffmanCodes => write!(f, "bad Huffman codes"),
+			Self::BadHuffmanDict => write!(f, "bad Huffman dictionary definition"),
 			Self::BadBackReference => {
 				write!(f, "bad DEFLATE back reference (goes past start of stream)")
 			}
@@ -71,15 +104,26 @@ impl<I: IOError> Display for Error<I> {
 #[cfg(feature = "std")]
 impl<I: IOError> std::error::Error for Error<I> {}
 
+/// a trait similar to [`std::io::Read`], but suitable for `no_std` environments.
+///
+/// note that this is implemented both for byte slices and [`std::io::BufReader`]
+/// (if `std` feature is enabled), so in most cases you won't need to implement it yourself.
 pub trait Read {
 	type Error: IOError;
+	/// read exactly `buf.len()` bytes into `buf`.
+	///
+	/// if there are less than `buf.len()` bytes available, an error should be produced.
 	fn read(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
+
+	/// skip `count` bytes.
+	///
+	/// a default implementation is provided which just calls [`Read::read`]
+	/// as needed, but in most cases a better implementation is possible.
 	fn skip_bytes(&mut self, count: usize) -> Result<(), Self::Error> {
 		let mut count = count;
-		const BUF_LEN: usize = 128;
-		let mut buf = [0; BUF_LEN];
+		let mut buf = [0; 128];
 		while count > 0 {
-			let c = min(BUF_LEN, count);
+			let c = min(buf.len(), count);
 			self.read(&mut buf[..c])?;
 			count -= c;
 		}
@@ -102,6 +146,7 @@ impl<T: std::io::Read + std::io::Seek> Read for std::io::BufReader<T> {
 	}
 }
 
+/// indicates unexpected end of file
 #[derive(Debug)]
 pub struct UnexpectedEofError;
 
@@ -110,6 +155,9 @@ impl core::fmt::Display for UnexpectedEofError {
 		write!(f, "unexpected EOF")
 	}
 }
+
+#[cfg(feature = "std")]
+impl std::error::Error for UnexpectedEofError {}
 
 impl<'a> Read for &'a [u8] {
 	type Error = UnexpectedEofError;
@@ -195,6 +243,8 @@ impl<R: Read> IdatReader<'_, R> {
 	}
 }
 
+/// image metadata which can be read very quickly from
+/// the start of the PNG file.
 #[derive(Debug, Clone, Copy)]
 pub struct ImageHeader {
 	width: u32,
@@ -203,13 +253,19 @@ pub struct ImageHeader {
 	color_type: ColorType,
 }
 
+/// color bit depth
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum BitDepth {
+	/// 1 bit per pixel (only used with indexed images)
 	One = 1,
+	/// 2 bits per pixel (only used with indexed images)
 	Two = 2,
+	/// 4 bits per pixel (only used with indexed images)
 	Four = 4,
+	/// 8 bits per channel (most common)
 	Eight = 8,
+	/// 16 bits per channel
 	Sixteen = 16,
 }
 
@@ -583,7 +639,7 @@ fn read_compressed_block<R: Read>(
 			} else if op == 16 {
 				let rep = reader.read_bits_usize(2)? + 3;
 				if i == 0 || i + rep > total_code_lengths {
-					return Err(Error::BadHuffmanCodes);
+					return Err(Error::BadHuffmanDict);
 				}
 				let l = code_lengths[i - 1];
 				for _ in 0..rep {
@@ -593,7 +649,7 @@ fn read_compressed_block<R: Read>(
 			} else if op == 17 {
 				let rep = reader.read_bits_usize(3)? + 3;
 				if i + rep > total_code_lengths {
-					return Err(Error::BadHuffmanCodes);
+					return Err(Error::BadHuffmanDict);
 				}
 				for _ in 0..rep {
 					code_lengths[i] = 0;
@@ -602,7 +658,7 @@ fn read_compressed_block<R: Read>(
 			} else if op == 18 {
 				let rep = reader.read_bits_usize(7)? + 11;
 				if i + rep > total_code_lengths {
-					return Err(Error::BadHuffmanCodes);
+					return Err(Error::BadHuffmanDict);
 				}
 				for _ in 0..rep {
 					code_lengths[i] = 0;
@@ -749,7 +805,7 @@ fn read_idat<R: Read>(
 
 	#[cfg(feature = "adler")]
 	{
-		// adler32 checksum
+		// Adler-32 checksum
 		let padding = reader.bits_left % 8;
 		if padding > 0 {
 			reader.bits >>= padding;
