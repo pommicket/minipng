@@ -9,5 +9,6 @@ edition = "2021"
 png = "0.17.10"
 
 [features]
-std = []
 default = ["std"]
+std = []
+adler = []
