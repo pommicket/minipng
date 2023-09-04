@@ -775,7 +775,15 @@ mod tests {
 	}
 
 	#[test]
-	fn test1() {
-		test_both!("examples/test.png");
+	fn test_small() {
+		test_both!("examples/small.png");
+	}
+	#[test]
+	fn test_earth0() {
+		test_both!("examples/earth0.png");
+	}
+	#[test]
+	fn test_earth9() {
+		test_both!("examples/earth9.png");
 	}
 }
