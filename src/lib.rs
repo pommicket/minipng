@@ -22,8 +22,9 @@ pub enum Error<I: IOError> {
 	BadHuffmanCodes,
 	BadBackReference,
 	UnsupportedInterlace,
-	UnsupportedPalette,
 	BadFilter,
+	BadPlteChunk,
+	BadTrnsChunk,
 }
 
 impl<I: IOError> From<I> for Error<I> {
@@ -53,7 +54,8 @@ impl<I: IOError> Display for Error<I> {
 			Self::TooLargeForUsize => write!(f, "decompressed data larger than usize::MAX bytes"),
 			Self::UnsupportedInterlace => write!(f, "unsupported interlacing method"),
 			Self::BadFilter => write!(f, "bad PNG filter"),
-			Self::UnsupportedPalette => write!(f, "unsupported palette"),
+			Self::BadPlteChunk => write!(f, "bad PLTE chunk"),
+			Self::BadTrnsChunk => write!(f, "bad tRNS chunk"),
 		}
 	}
 }
@@ -417,9 +419,10 @@ impl HuffmanTable {
 				self.subtables_used += 1;
 			}
 			let subtable = &mut self.subtables[usize::from(subtable_index)];
-			let diff = length - HUFFMAN_MAIN_TABLE_BITS;
 			for i in 0..1u16 << (HUFFMAN_MAX_BITS - length) {
-				subtable[usize::from(i << diff | code)] = value | u16::from(length) << 10;
+				subtable[usize::from(
+					i << (length - HUFFMAN_MAIN_TABLE_BITS) | code >> HUFFMAN_MAIN_TABLE_BITS,
+				)] = value | u16::from(length) << 10;
 			}
 		}
 	}
@@ -679,16 +682,45 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 	Ok(())
 }
 
+#[derive(Debug)]
+pub struct ImageData<'a> {
+	header: ImageHeader,
+	pixels: &'a [u8],
+	palette: [[u8; 4]; 256],
+}
+
+impl ImageData<'_> {
+	pub fn pixels(&self) -> &[u8] {
+		self.pixels
+	}
+	pub fn palette(&self) -> &[[u8; 4]] {
+		&self.palette[..]
+	}
+	pub fn width(&self) -> u32 {
+		self.header.width
+	}
+	pub fn height(&self) -> u32 {
+		self.header.height
+	}
+	pub fn bit_depth(&self) -> BitDepth {
+		self.header.bit_depth
+	}
+	pub fn color_type(&self) -> ColorType {
+		self.header.color_type
+	}
+}
+
 pub fn read_png<'a, R: Read>(
 	reader: &mut R,
 	header: Option<&ImageHeader>,
 	buf: &'a mut [u8],
-) -> Result<&'a [u8], Error<R::Error>> {
+) -> Result<ImageData<'a>, Error<R::Error>> {
 	let header = match header {
 		None => read_png_header(reader)?,
 		Some(h) => *h,
 	};
 	let mut writer = DecompressedDataWriter::from(buf);
+	let mut palette = [[0, 0, 0, 0]; 256];
 	loop {
 		let mut chunk_header = [0; 8];
 		reader.read(&mut chunk_header[..])?;
@@ -714,9 +746,30 @@ pub fn read_png<'a, R: Read>(
 				},
 				&mut writer,
 			)?;
-		} else if &chunk_type == b"PLTE" {
-			return Err(Error::UnsupportedPalette);
-		} else if chunk_type[0].is_ascii_lowercase() {
+		} else if &chunk_type == b"PLTE" && header.color_type == ColorType::Indexed {
+			if chunk_len > 256 * 3 || chunk_len % 3 != 0 {
+				return Err(Error::BadPlteChunk);
+			}
+			let count = chunk_len / 3;
+			let mut data = [0; 256 * 3];
+			reader.read(&mut data[..chunk_len])?;
+			for i in 0..count {
+				palette[i][0..3].copy_from_slice(&data[3 * i..3 * i + 3]);
+			}
+			// checksum
+			reader.skip_bytes(4)?;
+		} else if &chunk_type == b"tRNS" && header.color_type == ColorType::Indexed {
+			if chunk_len > 256 {
+				return Err(Error::BadTrnsChunk);
+			}
+			let mut data = [0; 256];
+			reader.read(&mut data[..chunk_len])?;
+			for i in 0..chunk_len {
+				palette[i][3] = data[i];
+			}
+			// checksum
+			reader.skip_bytes(4)?;
+		} else if chunk_type[0].is_ascii_lowercase() || &chunk_type == b"PLTE" {
 			// non-essential chunk
 			reader.skip_bytes(chunk_len + 4)?;
 		} else {
@@ -725,8 +778,11 @@ pub fn read_png<'a, R: Read>(
 	}
 	let buf = writer.slice;
 	apply_filters(&header, buf)?;
-
-	Ok(&buf[..header.data_size()])
+	Ok(ImageData {
+		pixels: &buf[..header.data_size()],
+		header,
+		palette,
+	})
 }
 
 #[cfg(test)]
@@ -745,7 +801,9 @@ mod tests {
 		let mut r = std::io::BufReader::new(File::open(path).expect("file not found"));
 		let tiny_header = read_png_header(&mut r).unwrap();
 		let mut tiny_buf = vec![0; tiny_header.required_bytes()];
-		let tiny_bytes = read_png(&mut r, Some(&tiny_header), &mut tiny_buf).unwrap();
+		let tiny_bytes = read_png(&mut r, Some(&tiny_header), &mut tiny_buf)
+			.unwrap()
+			.pixels;
 
 		assert_eq!(png_bytes.len(), tiny_bytes.len());
 		assert_eq!(png_bytes, tiny_bytes);
@@ -761,7 +819,9 @@ mod tests {
 
 		let tiny_header = read_png_header(&mut bytes).unwrap();
 		let mut tiny_buf = vec![0; tiny_header.required_bytes()];
-		let tiny_bytes = read_png(&mut bytes, Some(&tiny_header), &mut tiny_buf).unwrap();
+		let tiny_bytes = read_png(&mut bytes, Some(&tiny_header), &mut tiny_buf)
+			.unwrap()
+			.pixels;
 
 		assert_eq!(png_bytes.len(), tiny_bytes.len());
 		assert_eq!(png_bytes, tiny_bytes);
@@ -785,5 +845,9 @@ mod tests {
 	#[test]
 	fn test_earth9() {
 		test_both!("examples/earth9.png");
+	}
+	#[test]
+	fn test_earth_palette() {
+		test_both!("examples/earth_palette.png");
 	}
 }
