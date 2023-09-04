@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std)]
 
-use core::cmp::min;
+use core::cmp::{max, min};
 use core::fmt::{self, Debug, Display};
 
 pub trait IOError: Sized + Display + Debug {}
@@ -200,6 +200,15 @@ impl ColorType {
 			_ => return None,
 		})
 	}
+
+	fn channels(self) -> u8 {
+		match self {
+			Self::Gray | Self::Indexed => 1,
+			Self::GrayAlpha => 2,
+			Self::Rgb => 3,
+			Self::Rgba => 4,
+		}
+	}
 }
 
 impl ImageHeader {
@@ -219,6 +228,7 @@ impl ImageHeader {
 		let row_bytes = 1 + usize::try_from(self.width())
 			.ok()?
 			.checked_mul(usize::from(self.bit_depth() as u8))?
+			.checked_mul(usize::from(self.color_type().channels()))?
 			.checked_add(7)?
 			/ 8;
 		row_bytes.checked_mul(usize::try_from(self.height()).ok()?)
@@ -227,7 +237,10 @@ impl ImageHeader {
 		self.checked_required_bytes().unwrap()
 	}
 	pub fn bytes_per_scanline(&self) -> usize {
-		(self.width() as usize * usize::from(self.bit_depth() as u8) + 7) / 8
+		(self.width() as usize
+			* usize::from(self.bit_depth() as u8)
+			* usize::from(self.color_type().channels())
+			+ 7) / 8
 	}
 	fn data_size(&self) -> usize {
 		let scanline_bytes = self.bytes_per_scanline();
@@ -396,6 +409,16 @@ struct HuffmanTable {
 	subtables_used: u16,
 }
 
+impl Default for HuffmanTable {
+	fn default() -> Self {
+		Self {
+			main_table: [0; HUFFMAN_MAIN_TABLE_SIZE],
+			subtables: [[0; HUFFMAN_SUBTABLE_SIZE]; HUFFMAN_MAX_CODES],
+			subtables_used: 0,
+		}
+	}
+}
+
 impl HuffmanTable {
 	fn assign(&mut self, code: u16, length: u8, value: u16) {
 		if length == 0 {
@@ -439,11 +462,7 @@ impl HuffmanTable {
 			code = (code + bl_count[bits - 1]) << 1;
 			next_code[bits] = code;
 		}
-		let mut table = HuffmanTable {
-			main_table: [0; HUFFMAN_MAIN_TABLE_SIZE],
-			subtables: [[0; HUFFMAN_SUBTABLE_SIZE]; HUFFMAN_MAX_CODES],
-			subtables_used: 0,
-		};
+		let mut table = HuffmanTable::default();
 		for (i, l) in code_lengths.iter().copied().enumerate() {
 			table.assign(next_code[usize::from(l)], l, i as u16);
 			next_code[usize::from(l)] += 1;
@@ -539,7 +558,26 @@ fn read_compressed_block<R: Read>(
 		literal_length_table = HuffmanTable::from_code_lengths(literal_length_code_lengths);
 		distance_table = HuffmanTable::from_code_lengths(distance_code_lengths);
 	} else {
-		todo!()
+		let mut lit = HuffmanTable::default();
+		let mut dist = HuffmanTable::default();
+		for i in 0..=143 {
+			lit.assign(0b00110000 + i, 8, i);
+		}
+		for i in 144..=255 {
+			lit.assign(0b110010000 + (i - 144), 9, i);
+		}
+		for i in 256..=279 {
+			lit.assign(i - 256, 7, i);
+		}
+		for i in 280..=287 {
+			lit.assign(0b11000000 + (i - 280), 8, i);
+		}
+		for i in 0..30 {
+			dist.assign(i, 5, i);
+		}
+
+		literal_length_table = lit;
+		distance_table = dist;
 	}
 	loop {
 		let literal_length = literal_length_table.read_value(reader)?;
@@ -635,6 +673,10 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 	let mut s = 0;
 	let mut d = 0;
 
+	let x_byte_offset = max(
+		1,
+		usize::from(header.bit_depth as u8) * usize::from(header.color_type.channels()) / 8,
+	);
 	let scanline_bytes = header.bytes_per_scanline();
 	for scanline in 0..header.height() {
 		let filter = data[s];
@@ -642,16 +684,20 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 
 		for i in 0..scanline_bytes {
 			let x = i32::from(data[s]);
-			let a = i32::from(if i == 0 { 0 } else { data[d - 1] });
+			let a = i32::from(if i < x_byte_offset {
+				0
+			} else {
+				data[d - x_byte_offset]
+			});
 			let b = i32::from(if scanline == 0 {
 				0
 			} else {
 				data[d - scanline_bytes]
 			});
-			let c = i32::from(if scanline == 0 || i == 0 {
+			let c = i32::from(if scanline == 0 || i < x_byte_offset {
 				0
 			} else {
-				data[d - 1 - scanline_bytes]
+				data[d - x_byte_offset - scanline_bytes]
 			});
 
 			fn paeth(a: i32, b: i32, c: i32) -> i32 {
@@ -668,10 +714,15 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 				}
 			}
 			data[d] = (match filter {
+				// none
 				0 => x,
+				// sub
 				1 => x + a,
+				// up
 				2 => x + b,
+				// average
 				3 => x + (a + b) / 2,
+				// paeth
 				4 => x + paeth(a, b, c),
 				_ => return Err(Error::BadFilter),
 			}) as u8;
@@ -839,15 +890,23 @@ mod tests {
 		test_both!("examples/small.png");
 	}
 	#[test]
+	fn test_small_rgb() {
+		test_both!("test/small_rgb.png");
+	}
+	#[test]
+	fn test_small_rgba() {
+		test_both!("test/small_rgba.png");
+	}
+	#[test]
 	fn test_earth0() {
-		test_both!("examples/earth0.png");
+		test_both!("test/earth0.png");
 	}
 	#[test]
 	fn test_earth9() {
-		test_both!("examples/earth9.png");
+		test_both!("test/earth9.png");
 	}
 	#[test]
 	fn test_earth_palette() {
-		test_both!("examples/earth_palette.png");
+		test_both!("test/earth_palette.png");
 	}
 }
