@@ -52,6 +52,9 @@ pub enum Error {
 	BadAdlerChecksum,
 }
 
+#[cold]
+fn cold() {}
+
 /// alias for `Result<T, Error>`
 pub type Result<T> = core::result::Result<T, Error>;
 
@@ -344,8 +347,18 @@ impl<'a> From<IdatReader<'a>> for BitReader<'a> {
 
 impl BitReader<'_> {
 	fn read_more_bits(&mut self) -> Result<()> {
-		let mut new_bits = [0; ReadBits::BITS as usize / 8];
-		self.inner.read(&mut new_bits)?;
+		const BYTES: usize = ReadBits::BITS as usize / 8;
+		let mut new_bits = [0; BYTES];
+		let block_reader = &mut self.inner.block_reader.0;
+		if block_reader.len() >= BYTES {
+			// no bull shit goin on we can go right past everyone
+			//  (fast path for ~99.9% of calls)
+			new_bits.copy_from_slice(&block_reader[..BYTES]);
+			*block_reader = &block_reader[BYTES..];
+		} else {
+			cold();
+			self.inner.read(&mut new_bits)?;
+		}
 		let new_bits = Bits::from(ReadBits::from_le_bytes(new_bits));
 		self.bits |= new_bits << self.bits_left;
 		self.bits_left += ReadBits::BITS as u8;
@@ -362,8 +375,7 @@ impl BitReader<'_> {
 
 	fn read_bits(&mut self, count: u8) -> Result<u32> {
 		let bits = self.peek_bits(count)?;
-		self.bits_left -= count;
-		self.bits >>= count;
+		self.skip_peeked_bits(count);
 		Ok(bits)
 	}
 

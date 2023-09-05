@@ -61,6 +61,11 @@ A `pre-commit` git hook is provided to run `cargo fmt` and `cargo clippy`. You c
 ln -s ../../pre-commit .git/hooks/
 ```
 
+## Performance
+
+Benchmarks (see `cargo bench`) show that `tiny-png` is about 50% slower than `png`
+for large images, but faster than `png` for small images.
+
 ## License
 
 > Zero-Clause BSD
