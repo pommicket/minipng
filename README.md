@@ -8,7 +8,7 @@ Also it has tiny code size (e.g. &gt;8x smaller `.wasm.gz` size compared to the 
 
 ## Goals
 
-- Correctly decode all valid non-interlaced PNG files (on 32-bit platforms, some very large images
+- Correctly decode all valid non-interlaced PNG files (on ≤32-bit platforms, some very large images
   might fail because of `usize::MAX`).
 - Small code size &amp; complexity
 - No dependencies other than `core`
