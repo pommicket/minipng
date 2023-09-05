@@ -1,34 +1,16 @@
-#![cfg_attr(not(feature = "std"), no_std)]
+#![no_std]
 #![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 use core::cmp::{max, min};
 use core::fmt::{self, Debug, Display};
 
-/// trait for IO errors
-///
-/// we don't use [`std::io::Error`]
-/// so that this crate can be used in `no_std` environments.
-pub trait IOError: Sized + Display + Debug {
-	/// does this error indicate an unexpected end-of-file?
-	fn is_unexpected_eof(&self) -> bool;
-}
-
-#[cfg(feature = "std")]
-impl IOError for std::io::Error {
-	fn is_unexpected_eof(&self) -> bool {
-		self.kind() == std::io::ErrorKind::UnexpectedEof
-	}
-}
-
 /// decoding error
 #[derive(Debug)]
 #[non_exhaustive]
-pub enum Error<I: IOError> {
-	/// IO error — these can only be produced
-	/// by the underlying file/slice reader, not by
-	/// `tiny-png` itself.
-	IO(I),
+pub enum Error {
+	/// unexpected end-of-file
+	UnexpectedEof,
 	/// the buffer you provided is too small
 	/// (i.e. it's smaller than [`ImageHeader::required_bytes()`]).
 	BufferTooSmall,
@@ -39,7 +21,7 @@ pub enum Error<I: IOError> {
 	/// bad IHDR block (invalid PNG file)
 	BadIhdr,
 	/// unrecognized critical PNG chunk (invalid PNG file)
-	UnrecognizedChunk([u8; 4]),
+	UnrecognizedChunk,
 	/// bad ZLIB block type (invalid PNG file)
 	BadBlockType,
 	/// ZLIB LEN doesn't match NLEN (invalid PNG file)
@@ -70,22 +52,14 @@ pub enum Error<I: IOError> {
 	BadAdlerChecksum,
 }
 
-impl<I: IOError> From<I> for Error<I> {
-	fn from(value: I) -> Self {
-		Self::IO(value)
-	}
-}
-
-impl<I: IOError> Display for Error<I> {
+impl Display for Error {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		match self {
-			Self::IO(e) => write!(f, "{e}"),
+			Self::UnexpectedEof => write!(f, "unexpected end-of-file"),
 			Self::NotPng => write!(f, "not a png file"),
 			Self::BadIhdr => write!(f, "bad IHDR chunk"),
 			Self::BufferTooSmall => write!(f, "provided buffer is too small"),
-			Self::UnrecognizedChunk([a, b, c, d]) => {
-				write!(f, "unrecognized chunk type: {a} {b} {c} {d}")
-			}
+			Self::UnrecognizedChunk => write!(f, "unrecognized chunk type"),
 			Self::BadBlockType => write!(f, "bad DEFLATE block type"),
 			Self::TooMuchData => write!(f, "decompressed data is larger than it should be"),
 			Self::UnexpectedEob => write!(f, "unexpected end of block"),
@@ -107,152 +81,110 @@ impl<I: IOError> Display for Error<I> {
 	}
 }
 
-#[cfg(feature = "std")]
-impl<I: IOError> std::error::Error for Error<I> {}
+struct SliceReader<'a>(&'a [u8]);
 
-/// a trait similar to [`std::io::Read`], but suitable for `no_std` environments.
-///
-/// note that this is implemented both for byte slices and [`std::io::BufReader`]
-/// (if `std` feature is enabled), so in most cases you won't need to implement it yourself.
-pub trait Read {
-	/// associated error type
-	type Error: IOError;
+impl<'a> From<&'a [u8]> for SliceReader<'a> {
+	fn from(value: &'a [u8]) -> Self {
+		Self(value)
+	}
+}
 
-	/// read exactly `buf.len()` bytes into `buf`.
-	///
-	/// if there are less than `buf.len()` bytes available, an error should be produced.
-	fn read(&mut self, buf: &mut [u8]) -> Result<(), Self::Error>;
-
-	/// skip `count` bytes.
-	///
-	/// a default implementation is provided which just calls [`Read::read`]
-	/// as needed, but in most cases a better implementation is possible.
-	fn skip_bytes(&mut self, count: usize) -> Result<(), Self::Error> {
-		let mut count = count;
-		let mut buf = [0; 128];
-		while count > 0 {
-			let c = min(buf.len(), count);
-			self.read(&mut buf[..c])?;
-			count -= c;
+impl<'a> SliceReader<'a> {
+	fn read(&mut self, buf: &mut [u8]) -> usize {
+		let count = min(buf.len(), self.0.len());
+		buf[..count].copy_from_slice(&self.0[..count]);
+		self.0 = &self.0[count..];
+		count
+	}
+	fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+		if self.read(buf) == buf.len() {
+			Ok(())
+		} else {
+			Err(Error::UnexpectedEof)
 		}
+	}
+	fn skip_bytes(&mut self, bytes: usize) -> Result<(), Error> {
+		if self.0.len() < bytes {
+			return Err(Error::UnexpectedEof);
+		}
+		self.0 = &self.0[bytes..];
 		Ok(())
 	}
-}
-
-#[cfg(feature = "std")]
-impl<T: std::io::Read + std::io::Seek> Read for std::io::BufReader<T> {
-	type Error = std::io::Error;
-
-	fn read(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-		use std::io::Read;
-		self.read_exact(buf)
+	fn empty_out(&mut self) {
+		self.0 = &[][..];
 	}
-	fn skip_bytes(&mut self, bytes: usize) -> Result<(), Self::Error> {
-		use std::io::Seek;
-		self.seek(std::io::SeekFrom::Current(bytes as i64))
-			.map(|_| ())
+	fn take(&self, count: usize) -> SliceReader<'a> {
+		self.0[..min(count, self.0.len())].into()
 	}
 }
 
-/// indicates unexpected end of file
-#[derive(Debug)]
-pub struct UnexpectedEofError;
-
-impl core::fmt::Display for UnexpectedEofError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "unexpected EOF")
-	}
-}
-
-#[cfg(feature = "std")]
-impl std::error::Error for UnexpectedEofError {}
-
-impl IOError for UnexpectedEofError {
-	fn is_unexpected_eof(&self) -> bool {
-		true
-	}
-}
-
-impl<'a> Read for &'a [u8] {
-	type Error = UnexpectedEofError;
-	fn read(&mut self, buf: &mut [u8]) -> Result<(), Self::Error> {
-		if self.len() < buf.len() {
-			return Err(UnexpectedEofError);
-		}
-		buf.copy_from_slice(&self[..buf.len()]);
-		*self = &self[buf.len()..];
-		Ok(())
-	}
-	fn skip_bytes(&mut self, bytes: usize) -> Result<(), Self::Error> {
-		if self.len() < bytes {
-			return Err(UnexpectedEofError);
-		}
-		*self = &self[bytes..];
-		Ok(())
-	}
-}
-
-struct IdatReader<'a, R: Read> {
-	inner: &'a mut R,
-	bytes_left_in_block: usize,
-	palette: &'a mut [[u8; 4]; 256],
-	header: &'a ImageHeader,
+struct IdatReader<'a> {
+	block_reader: SliceReader<'a>,
+	full_reader: &'a mut SliceReader<'a>,
+	palette: Palette,
+	header: ImageHeader,
 	eof: bool,
 }
 
-impl<R: Read> IdatReader<'_, R> {
-	fn read_partial(&mut self, buf: &mut [u8]) -> Result<usize, Error<R::Error>> {
-		if self.bytes_left_in_block >= buf.len() {
-			self.inner.read(buf)?;
-			self.bytes_left_in_block -= buf.len();
+impl<'a> IdatReader<'a> {
+	fn new(reader: &'a mut SliceReader<'a>, header: ImageHeader) -> Result<Self, Error> {
+		let mut palette = [[0, 0, 0, 255]; 256];
+		let Some(idat_len) = read_non_idat_chunks(reader, &header, &mut palette)? else {
+			return Err(Error::NoIdat);
+		};
+		let idat_len: usize = idat_len.try_into().map_err(|_| Error::TooLargeForUsize)?;
+		let block_reader = reader.take(idat_len);
+		reader.skip_bytes(idat_len + 4)?;
+
+		Ok(IdatReader {
+			full_reader: reader,
+			block_reader,
+			header,
+			palette,
+			eof: false,
+		})
+	}
+
+	fn read(&mut self, buf: &mut [u8]) -> Result<usize, Error> {
+		let count = self.block_reader.read(buf);
+		if count == buf.len() {
 			Ok(buf.len())
 		} else {
-			if self.bytes_left_in_block > 0 {
-				self.inner.read(&mut buf[..self.bytes_left_in_block])?;
-			}
-			let bytes_read = self.bytes_left_in_block;
-
-			// CRC
-			self.inner.skip_bytes(4)?;
-
-			match read_non_idat_chunks(self.inner, self.header, self.palette)? {
+			match read_non_idat_chunks(self.full_reader, &self.header, &mut self.palette)? {
 				None => {
-					self.bytes_left_in_block = 0;
+					self.block_reader.empty_out();
 					self.eof = true;
-					Ok(bytes_read)
+					Ok(count)
 				}
 				Some(n) => {
-					self.bytes_left_in_block = n;
-					Ok(self.read_partial(&mut buf[bytes_read..])? + bytes_read)
+					let n = n as usize;
+					self.block_reader = self.full_reader.take(n);
+					self.full_reader.skip_bytes(n + 4)?; // skip block + CRC in full_reader
+					Ok(self.read(&mut buf[count..])? + count)
 				}
 			}
 		}
 	}
 
-	fn read(&mut self, buf: &mut [u8]) -> Result<(), Error<R::Error>> {
-		let count = self.read_partial(buf)?;
-		if count == buf.len() {
+	fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
+		if self.read(buf)? == buf.len() {
 			Ok(())
 		} else {
-			Err(Error::UnexpectedEob)
+			Err(Error::UnexpectedEof)
 		}
 	}
 
-	fn read_to_end(&mut self) -> Result<(), Error<R::Error>> {
+	fn read_to_end(&mut self) -> Result<(), Error> {
 		if !self.eof {
-			if self.bytes_left_in_block > 0 {
-				self.inner.skip_bytes(self.bytes_left_in_block)?;
-			}
-			// CRC
-			self.inner.skip_bytes(4)?;
+			self.block_reader.empty_out();
+			self.eof = true;
 			loop {
-				match read_non_idat_chunks(self.inner, self.header, self.palette)? {
+				match read_non_idat_chunks(self.full_reader, &self.header, &mut self.palette)? {
 					None => break,
-					Some(n) => self.inner.skip_bytes(n + 4)?,
+					Some(n) => self.full_reader.skip_bytes(n as usize + 4)?,
 				}
 			}
 		}
-		self.eof = true;
 		Ok(())
 	}
 }
@@ -331,6 +263,7 @@ impl ColorType {
 pub struct ImageHeader {
 	width: u32,
 	height: u32,
+	length: usize,
 	bit_depth: BitDepth,
 	color_type: ColorType,
 }
@@ -383,19 +316,21 @@ impl ImageHeader {
 	}
 }
 
+type Palette = [[u8; 4]; 256];
+
 /// number of bits to read in each [`Read::read`] call.
 type ReadBits = u32;
 /// number of bits to store in the [`BitReader`] buffer.
 type Bits = u64;
 
-struct BitReader<'a, R: Read> {
-	inner: IdatReader<'a, R>,
+struct BitReader<'a> {
+	inner: IdatReader<'a>,
 	bits: Bits,
 	bits_left: u8,
 }
 
-impl<'a, R: Read> From<IdatReader<'a, R>> for BitReader<'a, R> {
-	fn from(inner: IdatReader<'a, R>) -> Self {
+impl<'a> From<IdatReader<'a>> for BitReader<'a> {
+	fn from(inner: IdatReader<'a>) -> Self {
 		Self {
 			inner,
 			bits: 0,
@@ -404,17 +339,17 @@ impl<'a, R: Read> From<IdatReader<'a, R>> for BitReader<'a, R> {
 	}
 }
 
-impl<R: Read> BitReader<'_, R> {
-	fn read_more_bits(&mut self) -> Result<(), Error<R::Error>> {
+impl BitReader<'_> {
+	fn read_more_bits(&mut self) -> Result<(), Error> {
 		let mut new_bits = [0; ReadBits::BITS as usize / 8];
-		self.inner.read_partial(&mut new_bits)?;
+		self.inner.read(&mut new_bits)?;
 		let new_bits = Bits::from(ReadBits::from_le_bytes(new_bits));
 		self.bits |= new_bits << self.bits_left;
 		self.bits_left += ReadBits::BITS as u8;
 		Ok(())
 	}
 
-	fn peek_bits(&mut self, count: u8) -> Result<u32, Error<R::Error>> {
+	fn peek_bits(&mut self, count: u8) -> Result<u32, Error> {
 		debug_assert!(count > 0 && u32::from(count) <= 31);
 		if self.bits_left < count {
 			self.read_more_bits()?;
@@ -422,7 +357,7 @@ impl<R: Read> BitReader<'_, R> {
 		Ok((self.bits as u32) & ((1 << count) - 1))
 	}
 
-	fn read_bits(&mut self, count: u8) -> Result<u32, Error<R::Error>> {
+	fn read_bits(&mut self, count: u8) -> Result<u32, Error> {
 		let bits = self.peek_bits(count)?;
 		self.bits_left -= count;
 		self.bits >>= count;
@@ -436,29 +371,29 @@ impl<R: Read> BitReader<'_, R> {
 		self.bits >>= count;
 	}
 
-	fn read_bits_usize(&mut self, count: u8) -> Result<usize, Error<R::Error>> {
+	fn read_bits_usize(&mut self, count: u8) -> Result<usize, Error> {
 		debug_assert!(u32::from(count) <= usize::BITS);
 		self.read_bits(count).map(|x| x as usize)
 	}
 
-	fn read_bits_u8(&mut self, count: u8) -> Result<u8, Error<R::Error>> {
+	fn read_bits_u8(&mut self, count: u8) -> Result<u8, Error> {
 		debug_assert!(count <= 8);
 		self.read_bits(count).map(|x| x as u8)
 	}
 
-	fn read_bits_u16(&mut self, count: u8) -> Result<u16, Error<R::Error>> {
+	fn read_bits_u16(&mut self, count: u8) -> Result<u16, Error> {
 		debug_assert!(count <= 16);
 		self.read_bits(count).map(|x| x as u16)
 	}
 
-	fn read_aligned_bytes(&mut self, buf: &mut [u8]) -> Result<(), Error<R::Error>> {
+	fn read_aligned_bytes_exact(&mut self, buf: &mut [u8]) -> Result<(), Error> {
 		debug_assert_eq!(self.bits_left % 8, 0);
 		let mut i = 0;
 		while self.bits_left > 0 && i < buf.len() {
 			buf[i] = self.read_bits_u8(8)?;
 			i += 1;
 		}
-		self.inner.read(&mut buf[i..])
+		self.inner.read_exact(&mut buf[i..])
 	}
 }
 
@@ -475,7 +410,7 @@ impl<'a> From<&'a mut [u8]> for DecompressedDataWriter<'a> {
 }
 
 impl<'a> DecompressedDataWriter<'a> {
-	fn write_byte<I: IOError>(&mut self, byte: u8) -> Result<(), Error<I>> {
+	fn write_byte(&mut self, byte: u8) -> Result<(), Error> {
 		match self.slice.get_mut(self.pos) {
 			None => return Err(Error::TooMuchData),
 			Some(p) => *p = byte,
@@ -484,7 +419,7 @@ impl<'a> DecompressedDataWriter<'a> {
 		Ok(())
 	}
 
-	fn copy<I: IOError>(&mut self, distance: usize, length: usize) -> Result<(), Error<I>> {
+	fn copy(&mut self, distance: usize, length: usize) -> Result<(), Error> {
 		if self.pos < distance {
 			return Err(Error::BadBackReference);
 		}
@@ -605,7 +540,7 @@ impl HuffmanTable {
 		entry as u16
 	}
 
-	fn read_value<R: Read>(&self, reader: &mut BitReader<'_, R>) -> Result<u16, Error<R::Error>> {
+	fn read_value(&self, reader: &mut BitReader) -> Result<u16, Error> {
 		let code = reader.peek_bits(HUFFMAN_MAX_BITS)? as u16;
 		let entry = self.main_table[usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1)];
 		let entry = if entry > 0 {
@@ -627,7 +562,7 @@ impl HuffmanTable {
 pub struct ImageData<'a> {
 	header: ImageHeader,
 	buffer: &'a mut [u8],
-	palette: [[u8; 4]; 256],
+	palette: Palette,
 }
 
 impl ImageData<'_> {
@@ -678,7 +613,7 @@ impl ImageData<'_> {
 	/// note: this function can fail with [`Error::BufferTooSmall`]
 	///       if the buffer you allocated is too small!
 	///       make sure to use [`ImageHeader::required_bytes_rgba8bpc`] for this.
-	pub fn convert_to_rgba8bpc(&mut self) -> Result<(), Error<UnexpectedEofError>> {
+	pub fn convert_to_rgba8bpc(&mut self) -> Result<(), Error> {
 		let bit_depth = self.bit_depth();
 		let color_type = self.color_type();
 		let row_bytes = self.bytes_per_row();
@@ -829,22 +764,16 @@ impl ImageData<'_> {
 ///
 /// this function only needs to read a few bytes from the start of the file,
 /// so it should be very fast.
-pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::Error>> {
+pub fn read_png_header(bytes: &[u8]) -> Result<ImageHeader, Error> {
 	let mut signature = [0; 8];
-	match reader.read(&mut signature) {
-		Ok(()) => {}
-		Err(e) if e.is_unexpected_eof() => {
-			// make sure we give a NotPng error
-			signature = [0; 8];
-		}
-		Err(e) => return Err(e.into()),
-	}
-
-	if signature != [137, 80, 78, 71, 13, 10, 26, 10] {
+	let mut reader = SliceReader::from(bytes);
+	if reader.read(&mut signature) < signature.len()
+		|| signature != [137, 80, 78, 71, 13, 10, 26, 10]
+	{
 		return Err(Error::NotPng);
 	}
 	let mut ihdr = [0; 25];
-	reader.read(&mut ihdr)?;
+	reader.read_exact(&mut ihdr)?;
 	let ihdr_len = (u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]) + 12) as usize;
 	if &ihdr[4..8] != b"IHDR" || ihdr_len < ihdr.len() {
 		return Err(Error::BadIhdr);
@@ -904,13 +833,14 @@ pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::
 		height,
 		bit_depth,
 		color_type,
+		length: 8 + ihdr_len,
 	};
 	Ok(hdr)
 }
 
-fn read_dynamic_huffman_dictionary<R: Read>(
-	reader: &mut BitReader<'_, R>,
-) -> Result<(HuffmanTable, HuffmanTable), Error<R::Error>> {
+fn read_dynamic_huffman_dictionary(
+	reader: &mut BitReader<'_>,
+) -> Result<(HuffmanTable, HuffmanTable), Error> {
 	let literal_length_code_lengths_count = reader.read_bits_usize(5)? + 257;
 	let distance_code_lengths_count = reader.read_bits_usize(5)? + 1;
 	let code_length_code_lengths_count = reader.read_bits_usize(4)? + 4;
@@ -997,21 +927,18 @@ fn get_fixed_huffman_dictionaries() -> (HuffmanTable, HuffmanTable) {
 	(lit, dist)
 }
 
-fn read_compressed_block<R: Read>(
-	reader: &mut BitReader<'_, R>,
+fn read_compressed_block(
+	reader: &mut BitReader,
 	writer: &mut DecompressedDataWriter,
 	dynamic: bool,
-) -> Result<(), Error<R::Error>> {
+) -> Result<(), Error> {
 	let (literal_length_table, distance_table) = if dynamic {
 		read_dynamic_huffman_dictionary(reader)?
 	} else {
 		get_fixed_huffman_dictionaries()
 	};
 
-	fn parse_length<R: Read>(
-		reader: &mut BitReader<'_, R>,
-		literal_length: u16,
-	) -> Result<u16, Error<R::Error>> {
+	fn parse_length(reader: &mut BitReader, literal_length: u16) -> Result<u16, Error> {
 		Ok(match literal_length {
 			257..=264 => literal_length - 254,
 			265..=284 => {
@@ -1029,10 +956,7 @@ fn read_compressed_block<R: Read>(
 		})
 	}
 
-	fn parse_distance<R: Read>(
-		reader: &mut BitReader<'_, R>,
-		distance_code: u16,
-	) -> Result<u16, Error<R::Error>> {
+	fn parse_distance(reader: &mut BitReader, distance_code: u16) -> Result<u16, Error> {
 		Ok(match distance_code {
 			0..=3 => distance_code + 1,
 			4..=29 => {
@@ -1072,10 +996,10 @@ fn read_compressed_block<R: Read>(
 	Ok(())
 }
 
-fn read_uncompressed_block<R: Read>(
-	reader: &mut BitReader<'_, R>,
+fn read_uncompressed_block(
+	reader: &mut BitReader,
 	writer: &mut DecompressedDataWriter,
-) -> Result<(), Error<R::Error>> {
+) -> Result<(), Error> {
 	reader.bits >>= reader.bits_left % 8;
 	reader.bits_left -= reader.bits_left % 8;
 	let len = reader.read_bits_u16(16)?;
@@ -1087,15 +1011,12 @@ fn read_uncompressed_block<R: Read>(
 	if len > writer.slice.len() - writer.pos {
 		return Err(Error::TooMuchData);
 	}
-	reader.read_aligned_bytes(&mut writer.slice[writer.pos..writer.pos + len])?;
+	reader.read_aligned_bytes_exact(&mut writer.slice[writer.pos..writer.pos + len])?;
 	writer.pos += len;
 	Ok(())
 }
 
-fn read_idat<R: Read>(
-	reader: IdatReader<'_, R>,
-	writer: &mut DecompressedDataWriter,
-) -> Result<(), Error<R::Error>> {
+fn read_image(reader: IdatReader, writer: &mut DecompressedDataWriter) -> Result<Palette, Error> {
 	let mut reader = BitReader::from(reader);
 	// zlib header
 	let cmf = reader.read_bits(8)?;
@@ -1171,10 +1092,10 @@ fn read_idat<R: Read>(
 	// padding bytes
 	reader.inner.read_to_end()?;
 
-	Ok(())
+	Ok(reader.inner.palette)
 }
 
-fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<(), Error<I>> {
+fn apply_filters(header: &ImageHeader, data: &mut [u8]) -> Result<(), Error> {
 	let mut s = 0;
 	let mut d = 0;
 
@@ -1258,20 +1179,22 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 	Ok(())
 }
 
-fn read_non_idat_chunks<R: Read>(
-	reader: &mut R,
+fn read_non_idat_chunks(
+	reader: &mut SliceReader,
 	header: &ImageHeader,
-	palette: &mut [[u8; 4]; 256],
-) -> Result<Option<usize>, Error<R::Error>> {
+	palette: &mut Palette,
+) -> Result<Option<u32>, Error> {
 	loop {
 		let mut chunk_header = [0; 8];
-		reader.read(&mut chunk_header[..])?;
-		let chunk_len = u32::from_be_bytes([
+		reader.read_exact(&mut chunk_header[..])?;
+		let chunk_len: usize = u32::from_be_bytes([
 			chunk_header[0],
 			chunk_header[1],
 			chunk_header[2],
 			chunk_header[3],
-		]) as usize;
+		])
+		.try_into()
+		.map_err(|_| Error::TooLargeForUsize)?;
 		let chunk_type = [
 			chunk_header[4],
 			chunk_header[5],
@@ -1282,14 +1205,14 @@ fn read_non_idat_chunks<R: Read>(
 			reader.skip_bytes(4)?; // CRC
 			break;
 		} else if &chunk_type == b"IDAT" {
-			return Ok(Some(chunk_len));
+			return Ok(Some(chunk_len as u32));
 		} else if &chunk_type == b"PLTE" && header.color_type == ColorType::Indexed {
 			if chunk_len > 256 * 3 || chunk_len % 3 != 0 {
 				return Err(Error::BadPlteChunk);
 			}
 			let count = chunk_len / 3;
 			let mut data = [0; 256 * 3];
-			reader.read(&mut data[..chunk_len])?;
+			reader.read_exact(&mut data[..chunk_len])?;
 			for i in 0..count {
 				palette[i][0..3].copy_from_slice(&data[3 * i..3 * i + 3]);
 			}
@@ -1299,7 +1222,7 @@ fn read_non_idat_chunks<R: Read>(
 				return Err(Error::BadTrnsChunk);
 			}
 			let mut data = [0; 256];
-			reader.read(&mut data[..chunk_len])?;
+			reader.read_exact(&mut data[..chunk_len])?;
 			for i in 0..chunk_len {
 				palette[i][3] = data[i];
 			}
@@ -1308,7 +1231,7 @@ fn read_non_idat_chunks<R: Read>(
 			// non-essential chunk
 			reader.skip_bytes(chunk_len + 4)?;
 		} else {
-			return Err(Error::UnrecognizedChunk(chunk_type));
+			return Err(Error::UnrecognizedChunk);
 		}
 	}
 	Ok(None)
@@ -1316,39 +1239,19 @@ fn read_non_idat_chunks<R: Read>(
 
 /// read image data.
 ///
-/// if you are calling this after [`read_png_header`], be sure to pass the header you got
-/// into this function. otherwise, pass `None` for `header`.
-///
 /// the only non-stack memory used by this function is `buf` — it should be at least
 /// [`ImageHeader::required_bytes()`] bytes long, otherwise an [`Error::BufferTooSmall`]
 /// will be returned.
-pub fn read_png<'a, R: Read>(
-	reader: &mut R,
-	header: Option<&ImageHeader>,
-	buf: &'a mut [u8],
-) -> Result<ImageData<'a>, Error<R::Error>> {
-	let header = match header {
-		None => read_png_header(reader)?,
-		Some(h) => *h,
-	};
+pub fn read_png<'a>(bytes: &[u8], buf: &'a mut [u8]) -> Result<ImageData<'a>, Error> {
+	let header = read_png_header(bytes)?;
+	let bytes = &bytes[header.length..];
 	if buf.len() < header.required_bytes() {
 		return Err(Error::BufferTooSmall);
 	}
+
+	let mut reader = SliceReader::from(bytes);
 	let mut writer = DecompressedDataWriter::from(buf);
-	let mut palette = [[0, 0, 0, 255]; 256];
-	let Some(idat_len) = read_non_idat_chunks(reader, &header, &mut palette)? else {
-		return Err(Error::NoIdat);
-	};
-	read_idat(
-		IdatReader {
-			inner: reader,
-			bytes_left_in_block: idat_len,
-			header: &header,
-			palette: &mut palette,
-			eof: false,
-		},
-		&mut writer,
-	)?;
+	let mut palette = read_image(IdatReader::new(&mut reader, header)?, &mut writer)?;
 
 	if header.color_type == ColorType::Gray {
 		// set palette appropriately so that conversion functions don't have
@@ -1390,8 +1293,6 @@ pub fn read_png<'a, R: Read>(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	#[cfg(feature = "std")]
-	use std::fs::File;
 	extern crate alloc;
 
 	fn assert_eq_bytes(bytes1: &[u8], bytes2: &[u8]) {
@@ -1399,24 +1300,6 @@ mod tests {
 		for i in 0..bytes1.len() {
 			assert_eq!(bytes1[i], bytes2[i]);
 		}
-	}
-
-	#[cfg(feature = "std")]
-	fn test_file(path: &str) {
-		let decoder = png::Decoder::new(File::open(path).expect("file not found"));
-		let mut reader = decoder.read_info().unwrap();
-
-		let mut png_buf = alloc::vec![0; reader.output_buffer_size()];
-		let png_header = reader.next_frame(&mut png_buf).unwrap();
-		let png_bytes = &png_buf[..png_header.buffer_size()];
-
-		let mut r = std::io::BufReader::new(File::open(path).expect("file not found"));
-		let tiny_header = read_png_header(&mut r).unwrap();
-		let mut tiny_buf = alloc::vec![0; tiny_header.required_bytes()];
-		let image = read_png(&mut r, Some(&tiny_header), &mut tiny_buf).unwrap();
-		let tiny_bytes = image.pixels();
-
-		assert_eq_bytes(png_bytes, tiny_bytes);
 	}
 
 	fn test_bytes(bytes: &[u8]) {
@@ -1427,11 +1310,9 @@ mod tests {
 		let png_header = reader.next_frame(&mut png_buf).unwrap();
 		let png_bytes = &png_buf[..png_header.buffer_size()];
 
-		let mut p = bytes;
-		let tiny_header = read_png_header(&mut p).unwrap();
+		let tiny_header = read_png_header(bytes).unwrap();
 		let mut tiny_buf = alloc::vec![0; tiny_header.required_bytes_rgba8bpc()];
-		let mut image = read_png(&mut p, Some(&tiny_header), &mut tiny_buf).unwrap();
-		assert!(p.is_empty());
+		let mut image = read_png(bytes, &mut tiny_buf).unwrap();
 		let tiny_bytes = image.pixels();
 		assert_eq_bytes(png_bytes, tiny_bytes);
 
@@ -1440,115 +1321,111 @@ mod tests {
 		assert_eq_bytes(&data[..], image.pixels());
 	}
 
-	macro_rules! test_both {
+	macro_rules! test {
 		($file:literal) => {
-			#[cfg(feature = "std")]
-			{
-				test_file($file);
-			}
 			test_bytes(include_bytes!(concat!("../", $file)));
 		};
 	}
 
 	#[test]
 	fn test_small() {
-		test_both!("test/small.png");
+		test!("test/small.png");
 	}
 	#[test]
 	fn test_small_rgb() {
-		test_both!("test/small_rgb.png");
+		test!("test/small_rgb.png");
 	}
 	#[test]
 	fn test_tiny1bpp_gray() {
-		test_both!("test/tiny-1bpp-gray.png");
+		test!("test/tiny-1bpp-gray.png");
 	}
 	#[test]
 	fn test_tiny2bpp() {
-		test_both!("test/tiny-2bpp.png");
+		test!("test/tiny-2bpp.png");
 	}
 	#[test]
 	fn test_tiny_plte8bpp() {
-		test_both!("test/tinyplte-8bpp.png");
+		test!("test/tinyplte-8bpp.png");
 	}
 	#[test]
 	fn test_gray_alpha() {
-		test_both!("test/gray_alpha.png");
+		test!("test/gray_alpha.png");
 	}
 	#[test]
 	fn test_earth0() {
-		test_both!("test/earth0.png");
+		test!("test/earth0.png");
 	}
 	#[test]
 	fn test_earth9() {
-		test_both!("test/earth9.png");
+		test!("test/earth9.png");
 	}
 	#[test]
 	fn test_photograph() {
-		test_both!("test/photograph.png");
+		test!("test/photograph.png");
 	}
 	#[test]
 	fn test_earth_palette() {
-		test_both!("test/earth_palette.png");
+		test!("test/earth_palette.png");
 	}
 	#[test]
 	fn test_württemberg() {
-		test_both!("test/württemberg.png");
+		test!("test/württemberg.png");
 	}
 	#[test]
 	fn test_endsleigh() {
-		test_both!("test/endsleigh.png");
+		test!("test/endsleigh.png");
 	}
 	#[test]
 	fn test_1qps() {
-		test_both!("test/1QPS.png");
+		test!("test/1QPS.png");
 	}
 	#[test]
 	fn test_rabbit() {
-		test_both!("test/rabbit.png");
+		test!("test/rabbit.png");
 	}
 	#[test]
 	fn test_basketball() {
-		test_both!("test/basketball.png");
+		test!("test/basketball.png");
 	}
 	#[test]
 	fn test_triangle() {
-		test_both!("test/triangle.png");
+		test!("test/triangle.png");
 	}
 	#[test]
 	fn test_iroquois() {
-		test_both!("test/iroquois.png");
+		test!("test/iroquois.png");
 	}
 	#[test]
 	fn test_canada() {
-		test_both!("test/canada.png");
+		test!("test/canada.png");
 	}
 	#[test]
 	fn test_berry() {
-		test_both!("test/berry.png");
+		test!("test/berry.png");
 	}
 	#[test]
 	fn test_adam() {
-		test_both!("test/adam.png");
+		test!("test/adam.png");
 	}
 	#[test]
 	fn test_nightingale() {
-		test_both!("test/nightingale.png");
+		test!("test/nightingale.png");
 	}
 	#[test]
 	fn test_ratatoskr() {
-		test_both!("test/ratatoskr.png");
+		test!("test/ratatoskr.png");
 	}
 	#[test]
 	fn test_cheerios() {
-		test_both!("test/cheerios.png");
+		test!("test/cheerios.png");
 	}
 	#[test]
 	fn test_cavendish() {
-		test_both!("test/cavendish.png");
+		test!("test/cavendish.png");
 	}
 	#[test]
 	fn test_ouroboros() {
-		test_both!("test/ouroboros.png");
+		test!("test/ouroboros.png");
 	}
 	#[test]
 	fn test_bad_png() {
@@ -1558,9 +1435,9 @@ mod tests {
 	}
 	#[test]
 	fn test_buffer_too_small() {
-		let mut data = &include_bytes!("../test/ouroboros.png")[..];
+		let png = &include_bytes!("../test/ouroboros.png")[..];
 		let mut buffer = [0; 128];
-		let err = read_png(&mut data, None, &mut buffer[..]).unwrap_err();
+		let err = read_png(png, &mut buffer[..]).unwrap_err();
 		assert!(matches!(err, Error::BufferTooSmall));
 	}
 }

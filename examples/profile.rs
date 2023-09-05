@@ -10,10 +10,10 @@ fn main() {
 		let large_image = black_box(std::fs::read("benches/large.png").unwrap());
 
 		for _ in 0..100 {
-			let mut png = &large_image[..];
-			let header = tiny_png::read_png_header(&mut png).unwrap();
+			let png = &large_image[..];
+			let header = tiny_png::read_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::read_png(&mut png, Some(&header), &mut buf).unwrap();
+			let data = tiny_png::read_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		}
 	}

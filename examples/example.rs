@@ -1,10 +1,9 @@
 fn main() {
-	let mut png = &include_bytes!("image.png")[..];
-	let header = tiny_png::read_png_header(&mut png).expect("bad PNG");
+	let png = &include_bytes!("image.png")[..];
+	let header = tiny_png::read_png_header(png).expect("bad PNG");
 	println!("need {} bytes of memory", header.required_bytes());
 	let mut buffer = vec![0; header.required_bytes()];
-	let image = tiny_png::read_png(&mut png, Some(&header), &mut buffer).expect("bad PNG");
-	assert!(png.is_empty(), "extra data after PNG image end");
+	let image = tiny_png::read_png(png, &mut buffer).expect("bad PNG");
 	println!("{}×{} image", image.width(), image.height());
 	let pixels = image.pixels();
 	println!(
