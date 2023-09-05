@@ -895,8 +895,7 @@ fn read_idat<R: Read>(
 		}
 	}
 
-	#[cfg(feature = "adler")]
-	{
+	if cfg!(feature = "adler") {
 		// Adler-32 checksum
 		let padding = reader.bits_left % 8;
 		if padding > 0 {
@@ -944,55 +943,79 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 	let scanline_bytes = header.bytes_per_row();
 	for scanline in 0..header.height() {
 		let filter = data[s];
+		const FILTER_NONE: u8 = 0;
+		const FILTER_SUB: u8 = 1;
+		const FILTER_UP: u8 = 2;
+		const FILTER_AVG: u8 = 3;
+		const FILTER_PAETH: u8 = 4;
+
+		#[inline]
+		fn paeth(a: u8, b: u8, c: u8) -> u8 {
+			let p = i32::from(a) + i32::from(b) - i32::from(c);
+			let pa = (p - i32::from(a)).abs();
+			let pb = (p - i32::from(b)).abs();
+			let pc = (p - i32::from(c)).abs();
+			if pa <= pb && pa <= pc {
+				a
+			} else if pb <= pc {
+				b
+			} else {
+				c
+			}
+		}
+
 		s += 1;
-
-		for i in 0..scanline_bytes {
-			let x = i32::from(data[s]);
-			let a = i32::from(if i < x_byte_offset {
-				0
-			} else {
-				data[d - x_byte_offset]
-			});
-			let b = i32::from(if scanline == 0 {
-				0
-			} else {
-				data[d - scanline_bytes]
-			});
-			let c = i32::from(if scanline == 0 || i < x_byte_offset {
-				0
-			} else {
-				data[d - x_byte_offset - scanline_bytes]
-			});
-
-			fn paeth(a: i32, b: i32, c: i32) -> i32 {
-				let p = a + b - c;
-				let pa = (p - a).abs();
-				let pb = (p - b).abs();
-				let pc = (p - c).abs();
-				if pa <= pb && pa <= pc {
-					a
-				} else if pb <= pc {
-					b
-				} else {
-					c
+		data.copy_within(s..s + scanline_bytes, d);
+		match (filter, scanline == 0) {
+			(FILTER_NONE, _) | (FILTER_UP, true) => {}
+			(FILTER_SUB, _) => {
+				for i in d + x_byte_offset..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(data[i - x_byte_offset]);
 				}
 			}
-			data[d] = (match filter {
-				// none
-				0 => x,
-				// sub
-				1 => x + a,
-				// up
-				2 => x + b,
-				// average
-				3 => x + (a + b) / 2,
-				// paeth
-				4 => x + paeth(a, b, c),
-				_ => return Err(Error::BadFilter),
-			}) as u8;
-			s += 1;
-			d += 1;
+			(FILTER_UP, false) => {
+				for i in d..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(data[i - scanline_bytes]);
+				}
+			}
+			(FILTER_AVG, false) => {
+				for i in d..d + x_byte_offset {
+					data[i] = data[i].wrapping_add(data[i - scanline_bytes] / 2);
+				}
+				for i in d + x_byte_offset..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(
+						((u32::from(data[i - scanline_bytes]) + u32::from(data[i - x_byte_offset]))
+							/ 2) as u8,
+					);
+				}
+			}
+			(FILTER_AVG, true) => {
+				for i in d + x_byte_offset..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(data[i - x_byte_offset] / 2);
+				}
+			}
+			(FILTER_PAETH, false) => {
+				for i in d..d + x_byte_offset {
+					data[i] = data[i].wrapping_add(paeth(0, data[i - scanline_bytes], 0));
+				}
+				for i in d + x_byte_offset..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(paeth(
+						data[i - x_byte_offset],
+						data[i - scanline_bytes],
+						data[i - scanline_bytes - x_byte_offset],
+					));
+				}
+			}
+			(FILTER_PAETH, true) => {
+				for i in d + x_byte_offset..d + scanline_bytes {
+					data[i] = data[i].wrapping_add(paeth(data[i - x_byte_offset], 0, 0));
+				}
+			}
+			(5.., _) => return Err(Error::BadFilter),
 		}
+
+		s += scanline_bytes;
+		d += scanline_bytes;
 	}
 	Ok(())
 }
