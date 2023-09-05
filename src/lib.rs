@@ -1,10 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//#![deny(missing_docs)] // TODO
-/// # tiny-png
-///
-/// tiny PNG decoder with no dependencies
-///
-/// see README.md for usage.
+#![deny(missing_docs)]
+#![doc = include_str!("../README.md")]
+
 use core::cmp::{max, min};
 use core::fmt::{self, Debug, Display};
 
@@ -12,8 +9,17 @@ use core::fmt::{self, Debug, Display};
 ///
 /// we don't use [`std::io::Error`]
 /// so that this crate can be used in `no_std` environments.
-pub trait IOError: Sized + Display + Debug {}
-impl<T: Sized + Display + Debug> IOError for T {}
+pub trait IOError: Sized + Display + Debug {
+	/// does this error indicate an unexpected end-of-file?
+	fn is_unexpected_eof(&self) -> bool;
+}
+
+#[cfg(feature = "std")]
+impl IOError for std::io::Error {
+	fn is_unexpected_eof(&self) -> bool {
+		self.kind() == std::io::ErrorKind::UnexpectedEof
+	}
+}
 
 /// decoding error
 #[derive(Debug)]
@@ -26,10 +32,10 @@ pub enum Error<I: IOError> {
 	/// the buffer you provided is too small
 	/// (i.e. it's smaller than [`ImageHeader::required_bytes()`]).
 	BufferTooSmall,
-	/// this file is not a PNG file (missing PNG signature).
-	NotPng,
 	/// the size of the image data would not fit in a `usize` (so it could never be loaded into memory)
 	TooLargeForUsize,
+	/// this file is not a PNG file (missing PNG signature).
+	NotPng,
 	/// bad IHDR block (invalid PNG file)
 	BadIhdr,
 	/// unrecognized critical PNG chunk (invalid PNG file)
@@ -109,7 +115,9 @@ impl<I: IOError> std::error::Error for Error<I> {}
 /// note that this is implemented both for byte slices and [`std::io::BufReader`]
 /// (if `std` feature is enabled), so in most cases you won't need to implement it yourself.
 pub trait Read {
+	/// associated error type
 	type Error: IOError;
+
 	/// read exactly `buf.len()` bytes into `buf`.
 	///
 	/// if there are less than `buf.len()` bytes available, an error should be produced.
@@ -158,6 +166,12 @@ impl core::fmt::Display for UnexpectedEofError {
 
 #[cfg(feature = "std")]
 impl std::error::Error for UnexpectedEofError {}
+
+impl IOError for UnexpectedEofError {
+	fn is_unexpected_eof(&self) -> bool {
+		true
+	}
+}
 
 impl<'a> Read for &'a [u8] {
 	type Error = UnexpectedEofError;
@@ -243,16 +257,6 @@ impl<R: Read> IdatReader<'_, R> {
 	}
 }
 
-/// image metadata which can be read very quickly from
-/// the start of the PNG file.
-#[derive(Debug, Clone, Copy)]
-pub struct ImageHeader {
-	width: u32,
-	height: u32,
-	bit_depth: BitDepth,
-	color_type: ColorType,
-}
-
 /// color bit depth
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -269,12 +273,18 @@ pub enum BitDepth {
 	Sixteen = 16,
 }
 
+/// color format
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ColorType {
+	/// grayscale
 	Gray,
+	/// grayscale + alpha
 	GrayAlpha,
+	/// RGB
 	Rgb,
+	/// RGBA
 	Rgba,
+	/// indexed color (each pixel is an index into [`ImageData::palette`])
 	Indexed,
 }
 
@@ -313,16 +323,30 @@ impl ColorType {
 	}
 }
 
+/// image metadata found at the start of the PNG file.
+#[derive(Debug, Clone, Copy)]
+pub struct ImageHeader {
+	width: u32,
+	height: u32,
+	bit_depth: BitDepth,
+	color_type: ColorType,
+}
+
 impl ImageHeader {
+	/// width of image in pixels
 	pub fn width(&self) -> u32 {
 		self.width
 	}
+	/// height of image in pixels
 	pub fn height(&self) -> u32 {
 		self.height
 	}
+
+	/// bits per sample of image
 	pub fn bit_depth(&self) -> BitDepth {
 		self.bit_depth
 	}
+	/// number and type of color channels
 	pub fn color_type(&self) -> ColorType {
 		self.color_type
 	}
@@ -343,19 +367,23 @@ impl ImageHeader {
 	fn checked_required_bytes(&self) -> Option<usize> {
 		self.checked_decompressed_size()
 	}
+
+	/// number of bytes needed for [`read_png`]
 	pub fn required_bytes(&self) -> usize {
 		self.checked_required_bytes().unwrap()
 	}
 
-	pub fn bytes_per_scanline(&self) -> usize {
+	/// number of bytes in a single row of pixels
+	pub fn bytes_per_row(&self) -> usize {
 		(self.width() as usize
 			* usize::from(self.bit_depth() as u8)
 			* usize::from(self.color_type().channels())
 			+ 7) / 8
 	}
+
 	fn data_size(&self) -> usize {
-		let scanline_bytes = self.bytes_per_scanline();
-		scanline_bytes * self.height() as usize
+		let row_bytes = self.bytes_per_row();
+		row_bytes * self.height() as usize
 	}
 }
 
@@ -432,46 +460,6 @@ impl<R: Read> BitReader<'_, R> {
 		}
 		self.inner.read(&mut buf[i..])
 	}
-}
-
-pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::Error>> {
-	let mut signature = [0; 8];
-	reader.read(&mut signature)?;
-	if signature != [137, 80, 78, 71, 13, 10, 26, 10] {
-		return Err(Error::NotPng);
-	}
-	let mut ihdr = [0; 25];
-	reader.read(&mut ihdr)?;
-	let ihdr_len = (u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]) + 12) as usize;
-	if &ihdr[4..8] != b"IHDR" || ihdr_len < ihdr.len() {
-		return Err(Error::BadIhdr);
-	}
-	reader.skip_bytes(ihdr_len - ihdr.len())?;
-
-	let width = u32::from_be_bytes([ihdr[8], ihdr[9], ihdr[10], ihdr[11]]);
-	let height = u32::from_be_bytes([ihdr[12], ihdr[13], ihdr[14], ihdr[15]]);
-	let bit_depth = BitDepth::from_byte(ihdr[16]).ok_or(Error::BadIhdr)?;
-	let color_type = ColorType::from_byte(ihdr[17]).ok_or(Error::BadIhdr)?;
-	let compression = ihdr[18];
-	let filter = ihdr[19];
-	let interlace = ihdr[20];
-	if compression != 0 || filter != 0 {
-		return Err(Error::BadIhdr);
-	}
-	if interlace != 0 {
-		return Err(Error::UnsupportedInterlace);
-	}
-
-	let hdr = ImageHeader {
-		width,
-		height,
-		bit_depth,
-		color_type,
-	};
-	if hdr.checked_required_bytes().is_none() {
-		return Err(Error::TooLargeForUsize);
-	}
-	Ok(hdr)
 }
 
 #[derive(Debug)]
@@ -606,6 +594,110 @@ impl HuffmanTable {
 		reader.skip_peeked_bits(length);
 		Ok(entry & 0x1ff)
 	}
+}
+
+/// image data
+#[derive(Debug)]
+pub struct ImageData<'a> {
+	header: ImageHeader,
+	buffer: &'a mut [u8],
+	palette: [[u8; 4]; 256],
+}
+
+impl ImageData<'_> {
+	/// get pixel values encoded as bytes.
+	///
+	/// this is guaranteed to be a prefix of the buffer passed to [`read_png`].
+	pub fn pixels(&self) -> &[u8] {
+		&self.buffer[..self.header.data_size()]
+	}
+
+	/// get color in palette at index.
+	///
+	/// returns `[0, 0, 0, 255]` if `index` is out of range.
+	pub fn palette(&self, index: u32) -> [u8; 4] {
+		let Ok(index) = usize::try_from(index) else {
+			return [0, 0, 0, 255];
+		};
+		self.palette.get(index).copied().unwrap_or([0, 0, 0, 255])
+	}
+
+	/// image width in pixels
+	pub fn width(&self) -> u32 {
+		self.header.width
+	}
+
+	/// image height in pixels
+	pub fn height(&self) -> u32 {
+		self.header.height
+	}
+
+	/// bits per sample of image
+	pub fn bit_depth(&self) -> BitDepth {
+		self.header.bit_depth
+	}
+
+	/// number and type of color channels
+	pub fn color_type(&self) -> ColorType {
+		self.header.color_type
+	}
+
+	/// number of bytes in a single row of pixels
+	pub fn bytes_per_row(&self) -> usize {
+		self.header.bytes_per_row()
+	}
+}
+
+/// read image metadata.
+///
+/// this function only needs to read a few bytes from the start of the file,
+/// so it should be very fast.
+pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::Error>> {
+	let mut signature = [0; 8];
+	match reader.read(&mut signature) {
+		Ok(()) => {}
+		Err(e) if e.is_unexpected_eof() => {
+			// make sure we give a NotPng error
+			signature = [0; 8];
+		}
+		Err(e) => return Err(e.into()),
+	}
+
+	if signature != [137, 80, 78, 71, 13, 10, 26, 10] {
+		return Err(Error::NotPng);
+	}
+	let mut ihdr = [0; 25];
+	reader.read(&mut ihdr)?;
+	let ihdr_len = (u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]) + 12) as usize;
+	if &ihdr[4..8] != b"IHDR" || ihdr_len < ihdr.len() {
+		return Err(Error::BadIhdr);
+	}
+	reader.skip_bytes(ihdr_len - ihdr.len())?;
+
+	let width = u32::from_be_bytes([ihdr[8], ihdr[9], ihdr[10], ihdr[11]]);
+	let height = u32::from_be_bytes([ihdr[12], ihdr[13], ihdr[14], ihdr[15]]);
+	let bit_depth = BitDepth::from_byte(ihdr[16]).ok_or(Error::BadIhdr)?;
+	let color_type = ColorType::from_byte(ihdr[17]).ok_or(Error::BadIhdr)?;
+	let compression = ihdr[18];
+	let filter = ihdr[19];
+	let interlace = ihdr[20];
+	if compression != 0 || filter != 0 {
+		return Err(Error::BadIhdr);
+	}
+	if interlace != 0 {
+		return Err(Error::UnsupportedInterlace);
+	}
+
+	let hdr = ImageHeader {
+		width,
+		height,
+		bit_depth,
+		color_type,
+	};
+	if hdr.checked_required_bytes().is_none() {
+		return Err(Error::TooLargeForUsize);
+	}
+	Ok(hdr)
 }
 
 fn read_compressed_block<R: Read>(
@@ -849,7 +941,7 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 		1,
 		usize::from(header.bit_depth as u8) * usize::from(header.color_type.channels()) / 8,
 	);
-	let scanline_bytes = header.bytes_per_scanline();
+	let scanline_bytes = header.bytes_per_row();
 	for scanline in 0..header.height() {
 		let filter = data[s];
 		s += 1;
@@ -903,34 +995,6 @@ fn apply_filters<I: IOError>(header: &ImageHeader, data: &mut [u8]) -> Result<()
 		}
 	}
 	Ok(())
-}
-
-#[derive(Debug)]
-pub struct ImageData<'a> {
-	header: ImageHeader,
-	buffer: &'a mut [u8],
-	palette: [[u8; 4]; 256],
-}
-
-impl ImageData<'_> {
-	pub fn pixels(&self) -> &[u8] {
-		&self.buffer[..self.header.data_size()]
-	}
-	pub fn palette(&self) -> &[[u8; 4]] {
-		&self.palette[..]
-	}
-	pub fn width(&self) -> u32 {
-		self.header.width
-	}
-	pub fn height(&self) -> u32 {
-		self.header.height
-	}
-	pub fn bit_depth(&self) -> BitDepth {
-		self.header.bit_depth
-	}
-	pub fn color_type(&self) -> ColorType {
-		self.header.color_type
-	}
 }
 
 fn read_non_idat_chunks<R: Read>(
@@ -991,6 +1055,14 @@ fn read_non_idat_chunks<R: Read>(
 	Ok(None)
 }
 
+/// read image data.
+///
+/// if you are calling this after [`read_png_header`], be sure to pass the header you got
+/// into this function. otherwise, pass `None` for `header`.
+///
+/// the only non-stack memory used by this function is `buf` — it should be at least
+/// [`ImageHeader::required_bytes()`] bytes long, otherwise an [`Error::BufferTooSmall`]
+/// will be returned.
 pub fn read_png<'a, R: Read>(
 	reader: &mut R,
 	header: Option<&ImageHeader>,
@@ -1176,9 +1248,6 @@ mod tests {
 	#[test]
 	fn test_bad_png() {
 		let mut data = &b"hello"[..];
-		// in this case we might actually get an unexpected EOF
-		assert!(read_png_header(&mut data).is_err());
-		let mut data = &b"helloadfalskdfjlksajdflkjsadlkfj"[..];
 		let err = read_png_header(&mut data).unwrap_err();
 		assert!(matches!(err, Error::NotPng));
 	}
