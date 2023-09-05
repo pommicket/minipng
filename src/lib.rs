@@ -506,23 +506,32 @@ impl<'a> DecompressedDataWriter<'a> {
 
 const HUFFMAN_MAX_CODES: usize = 286;
 const HUFFMAN_MAX_BITS: u8 = 15;
+/// wow i benchmarked this and got the same optimal number as miniz. cool.
 const HUFFMAN_MAIN_TABLE_BITS: u8 = 10;
 const HUFFMAN_MAIN_TABLE_SIZE: usize = 1 << HUFFMAN_MAIN_TABLE_BITS;
-const HUFFMAN_SUBTABLE_SIZE: usize = 1 << (HUFFMAN_MAX_BITS - HUFFMAN_MAIN_TABLE_BITS);
+
+/// table used for huffman lookup
+///
+/// the idea for this huffman table is stolen from miniz.
+/// it's a combination of a look-up table and huffman tree.
+/// for short codes, the look-up table returns a positive value
+/// which is just the encoded value and length.
+/// for long codes, the look-up table returns a position in the tree
+/// to start from.
 #[derive(Debug)]
 struct HuffmanTable {
 	main_table: [i16; HUFFMAN_MAIN_TABLE_SIZE],
-	subtables: [[u16; HUFFMAN_SUBTABLE_SIZE]; HUFFMAN_MAX_CODES + 1],
-	subtables_used: i16,
+	tree: [i16; HUFFMAN_MAX_CODES * 2 + 1],
+	tree_used: i16,
 }
 
 impl Default for HuffmanTable {
 	fn default() -> Self {
 		Self {
 			main_table: [0; HUFFMAN_MAIN_TABLE_SIZE],
-			subtables: [[0; HUFFMAN_SUBTABLE_SIZE]; HUFFMAN_MAX_CODES + 1],
-			// reserve "null" subtable
-			subtables_used: 1,
+			tree: [0; HUFFMAN_MAX_CODES * 2 + 1],
+			// reserve "null" tree index
+			tree_used: 1,
 		}
 	}
 }
@@ -537,28 +546,42 @@ impl HuffmanTable {
 
 		if length <= HUFFMAN_MAIN_TABLE_BITS {
 			// just throw it in the main table
-			for i in 0..1u16 << (HUFFMAN_MAIN_TABLE_BITS - length) {
-				self.main_table[usize::from(i << length | code)] =
-					value as i16 | i16::from(length) << 9;
+			let increment = 1 << length;
+			let mut i = usize::from(code);
+			let entry = value as i16 | i16::from(length) << 9;
+			for _ in 0..1u16 << (HUFFMAN_MAIN_TABLE_BITS - length) {
+				self.main_table[i] = entry;
+				i += increment;
 			}
 		} else {
-			// put it in a subtable.
+			// put it in the tree
 			let main_table_entry = usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1);
-			let subtable_index = if self.main_table[main_table_entry] == 0 {
-				let i = self.subtables_used;
-				self.main_table[main_table_entry] = -i;
-				self.subtables_used += 1;
-				i
-			} else {
-				debug_assert!(self.main_table[main_table_entry] < 0);
-				-self.main_table[main_table_entry]
-			};
-			let subtable = &mut self.subtables[subtable_index as usize];
-			for i in 0..1u16 << (HUFFMAN_MAX_BITS - length) {
-				subtable[usize::from(
-					i << (length - HUFFMAN_MAIN_TABLE_BITS) | code >> HUFFMAN_MAIN_TABLE_BITS,
-				)] = value | u16::from(length) << 9;
+			let mut code = code >> HUFFMAN_MAIN_TABLE_BITS;
+			let mut node = (code & 1) as i16
+				+ if self.main_table[main_table_entry] == 0 {
+					let i = self.tree_used;
+					self.main_table[main_table_entry] = -i;
+					self.tree_used += 2;
+					i
+				} else {
+					debug_assert!(self.main_table[main_table_entry] < 0);
+					-self.main_table[main_table_entry]
+				};
+			code >>= 1;
+			for _ in 0..length - 1 - HUFFMAN_MAIN_TABLE_BITS {
+				node = (code & 1) as i16
+					+ if self.tree[node as usize] == 0 {
+						let i = self.tree_used;
+						self.tree[node as usize] = -i;
+						self.tree_used += 2;
+						i
+					} else {
+						debug_assert!(self.tree[node as usize] < 0);
+						-self.tree[node as usize]
+					};
+				code >>= 1;
 			}
+			self.tree[node as usize] = value as i16 | i16::from(length) << 9;
 		}
 	}
 
@@ -583,13 +606,16 @@ impl HuffmanTable {
 	}
 
 	fn read_value<R: Read>(&self, reader: &mut BitReader<'_, R>) -> Result<u16, Error<R::Error>> {
-		let code = reader.peek_bits(HUFFMAN_MAX_BITS)? as u16;
-		let entry = self.main_table[usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1)];
-		let entry = if entry > 0 {
-			entry as u16
-		} else {
-			self.subtables[(-entry) as usize][usize::from(code >> HUFFMAN_MAIN_TABLE_BITS)]
-		};
+		let mut code = reader.peek_bits(HUFFMAN_MAX_BITS)? as u16;
+		let mut entry = self.main_table[usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1)];
+		if entry < 0 {
+			code >>= HUFFMAN_MAIN_TABLE_BITS;
+			while entry < 0 {
+				entry = self.tree[usize::from(code & 1) + (-entry) as usize];
+				code >>= 1;
+			}
+		}
+		let entry = entry as u16;
 		let length = (entry >> 9) as u8;
 		if length == 0 {
 			return Err(Error::BadCode);
