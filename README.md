@@ -4,6 +4,8 @@ Tiny Rust PNG decoder.
 
 This decoder can be used without `std` or `alloc` by disabling the `std` feature (enabled by default).
 
+Also it has tiny code size (e.g. 5x smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
+
 ## Goals
 
 - Correctly decode all valid non-interlaced PNG files which can fit in memory.
@@ -63,3 +65,23 @@ A `pre-commit` git hook is provided to run `cargo fmt` and `cargo clippy`. You c
 ```sh
 ln -s ../../pre-commit .git/hooks/
 ```
+
+## License
+
+```text
+Zero-Clause BSD
+=============
+
+Permission to use, copy, modify, and/or distribute this software for
+any purpose with or without fee is hereby granted.
+
+THE SOFTWARE IS PROVIDED “AS IS” AND THE AUTHOR DISCLAIMS ALL
+WARRANTIES WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES
+OF MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE
+FOR ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY
+DAMAGES WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN
+AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+```
+
+Note: all the test PNG images are either in the U.S. public domain or are CC0-licensed.

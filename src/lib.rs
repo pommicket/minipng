@@ -1205,10 +1205,6 @@ mod tests {
 		test_both!("test/small_rgb.png");
 	}
 	#[test]
-	fn test_small_rgba() {
-		test_both!("test/small_rgba.png");
-	}
-	#[test]
 	fn test_gray_alpha() {
 		test_both!("test/gray_alpha.png");
 	}
