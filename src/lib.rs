@@ -32,7 +32,7 @@ pub enum Error<I: IOError> {
 	/// the buffer you provided is too small
 	/// (i.e. it's smaller than [`ImageHeader::required_bytes()`]).
 	BufferTooSmall,
-	/// the size of the image data would not fit in a `usize` (so it could never be loaded into memory)
+	/// the image is at least `usize::MAX / 9` pixels big.
 	TooLargeForUsize,
 	/// this file is not a PNG file (missing PNG signature).
 	NotPng,
@@ -258,14 +258,17 @@ impl<R: Read> IdatReader<'_, R> {
 }
 
 /// color bit depth
+///
+/// note that [`Self::One`], [`Self::Two`], [`Self::Four`] are only used with
+/// indexed and grayscale images.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum BitDepth {
-	/// 1 bit per pixel (only used with indexed images)
+	/// 1 bit per pixel
 	One = 1,
-	/// 2 bits per pixel (only used with indexed images)
+	/// 2 bits per pixel
 	Two = 2,
-	/// 4 bits per pixel (only used with indexed images)
+	/// 4 bits per pixel
 	Four = 4,
 	/// 8 bits per channel (most common)
 	Eight = 8,
@@ -350,27 +353,21 @@ impl ImageHeader {
 	pub fn color_type(&self) -> ColorType {
 		self.color_type
 	}
-	fn checked_decompressed_size(&self) -> Option<usize> {
-		let row_bytes = 1 + usize::try_from(self.width())
-			.ok()?
-			.checked_mul(usize::from(self.bit_depth() as u8))?
-			.checked_mul(usize::from(self.color_type().channels()))?
-			.checked_add(7)?
-			/ 8;
-		row_bytes.checked_mul(usize::try_from(self.height()).ok()?)
-	}
-
 	fn decompressed_size(&self) -> usize {
-		self.checked_decompressed_size().unwrap()
-	}
-
-	fn checked_required_bytes(&self) -> Option<usize> {
-		self.checked_decompressed_size()
+		(self.bytes_per_row() + 1) * self.height() as usize
 	}
 
 	/// number of bytes needed for [`read_png`]
 	pub fn required_bytes(&self) -> usize {
-		self.checked_required_bytes().unwrap()
+		self.decompressed_size()
+	}
+
+	/// number of bytes needed for [`read_png`], followed by [`ImageData::convert_to_rgba8bpc`]
+	pub fn required_bytes_rgba8bpc(&self) -> usize {
+		max(
+			self.required_bytes(),
+			4 * self.width() as usize * self.height() as usize,
+		)
 	}
 
 	/// number of bytes in a single row of pixels
@@ -635,11 +632,11 @@ impl ImageData<'_> {
 	/// get color in palette at index.
 	///
 	/// returns `[0, 0, 0, 255]` if `index` is out of range.
-	pub fn palette(&self, index: u32) -> [u8; 4] {
-		let Ok(index) = usize::try_from(index) else {
-			return [0, 0, 0, 255];
-		};
-		self.palette.get(index).copied().unwrap_or([0, 0, 0, 255])
+	pub fn palette(&self, index: u8) -> [u8; 4] {
+		self.palette
+			.get(usize::from(index))
+			.copied()
+			.unwrap_or([0, 0, 0, 255])
 	}
 
 	/// image width in pixels
@@ -665,6 +662,155 @@ impl ImageData<'_> {
 	/// number of bytes in a single row of pixels
 	pub fn bytes_per_row(&self) -> usize {
 		self.header.bytes_per_row()
+	}
+
+	/// convert `self` to 8-bits-per-channel RGBA
+	///
+	/// note: this function can fail with [`Error::BufferTooSmall`]
+	///       if the buffer you allocated is too small!
+	///       make sure to use [`ImageHeader::required_bytes_rgba8bpc`] for this.
+	pub fn convert_to_rgba8bpc(&mut self) -> Result<(), Error<UnexpectedEofError>> {
+		let bit_depth = self.bit_depth();
+		let color_type = self.color_type();
+		let row_bytes = self.bytes_per_row();
+		let width = self.width() as usize;
+		let height = self.height() as usize;
+		let area = width * height;
+		let palette = self.palette;
+		let buffer = &mut self.buffer[..];
+		if buffer.len() < 4 * area {
+			return Err(Error::BufferTooSmall);
+		}
+		match (bit_depth, color_type) {
+			(BitDepth::Eight, ColorType::Rgba) => {}
+			(BitDepth::Eight, ColorType::Rgb) => {
+				// we have to process the pixels in reverse
+				// to avoid overwriting data we'll need later
+				let mut dest = 4 * area;
+				let mut src = 3 * area;
+				for _ in 0..area {
+					buffer[dest - 1] = 255;
+					buffer[dest - 2] = buffer[src - 1];
+					buffer[dest - 3] = buffer[src - 2];
+					buffer[dest - 4] = buffer[src - 3];
+					dest -= 4;
+					src -= 3;
+				}
+			}
+			(BitDepth::Sixteen, ColorType::Rgba) => {
+				let mut dest = 0;
+				let mut src = 0;
+				for _ in 0..area {
+					buffer[dest] = buffer[src];
+					buffer[dest + 1] = buffer[src + 2];
+					buffer[dest + 2] = buffer[src + 4];
+					buffer[dest + 3] = buffer[src + 8];
+					dest += 4;
+					src += 8;
+				}
+			}
+			(BitDepth::Sixteen, ColorType::Rgb) => {
+				let mut dest = 0;
+				let mut src = 0;
+				for _ in 0..area {
+					buffer[dest] = buffer[src];
+					buffer[dest + 1] = buffer[src + 2];
+					buffer[dest + 2] = buffer[src + 4];
+					buffer[dest + 3] = 255;
+					dest += 4;
+					src += 6;
+				}
+			}
+			(BitDepth::Eight, ColorType::Gray) => {
+				let mut dest = 4 * area;
+				let mut src = area;
+				for _ in 0..area {
+					buffer[dest - 1] = 255;
+					buffer[dest - 2] = buffer[src - 1];
+					buffer[dest - 3] = buffer[src - 1];
+					buffer[dest - 4] = buffer[src - 1];
+					dest -= 4;
+					src -= 1;
+				}
+			}
+			(BitDepth::Eight, ColorType::GrayAlpha) => {
+				let mut dest = 4 * area;
+				let mut src = 2 * area;
+				for _ in 0..area {
+					buffer[dest - 1] = buffer[src - 1];
+					buffer[dest - 2] = buffer[src - 2];
+					buffer[dest - 3] = buffer[src - 2];
+					buffer[dest - 4] = buffer[src - 2];
+					dest -= 4;
+					src -= 2;
+				}
+			}
+			(BitDepth::Sixteen, ColorType::Gray) => {
+				let mut dest = 4 * area;
+				let mut src = 2 * area;
+				for _ in 0..area {
+					buffer[dest - 1] = 255;
+					buffer[dest - 2] = buffer[src - 2];
+					buffer[dest - 3] = buffer[src - 2];
+					buffer[dest - 4] = buffer[src - 2];
+					dest -= 4;
+					src -= 2;
+				}
+			}
+			(BitDepth::Sixteen, ColorType::GrayAlpha) => {
+				let mut i = 0;
+				for _ in 0..area {
+					// Ghi Glo Ahi Alo
+					// i   i+1 i+2 i+3
+					buffer[i + 3] = buffer[i + 2];
+					buffer[i + 1] = buffer[i];
+					buffer[i + 2] = buffer[i];
+					i += 4;
+				}
+			}
+			(BitDepth::Eight, ColorType::Indexed) => {
+				let mut dest = 4 * area;
+				let mut src = area;
+				for _ in 0..area {
+					let index: usize = buffer[src].into();
+					buffer[dest - 4..dest].copy_from_slice(&palette[index]);
+					dest -= 4;
+					src -= 1;
+				}
+			}
+			(
+				BitDepth::One | BitDepth::Two | BitDepth::Four,
+				ColorType::Indexed | ColorType::Gray,
+			) => {
+				let mut dest = 4 * area;
+				let bit_depth = bit_depth as u8;
+				for row in (0..height).rev() {
+					let mut src = row * row_bytes + row_bytes - 1;
+					let excess_bits = (width % (8 / usize::from(bit_depth))) as u8 * bit_depth;
+					let mut src_bit = if excess_bits > 0 { excess_bits } else { 8 };
+					for _ in 0..width {
+						if src_bit == 0 {
+							src -= 1;
+							src_bit = 8;
+						}
+						src_bit -= bit_depth;
+						let index: usize =
+							((buffer[src] >> src_bit) & ((1 << bit_depth) - 1)).into();
+						buffer[dest - 4..dest].copy_from_slice(&palette[index]);
+						dest -= 4;
+					}
+				}
+			}
+			(
+				BitDepth::One | BitDepth::Two | BitDepth::Four,
+				ColorType::Rgb | ColorType::Rgba | ColorType::GrayAlpha,
+			)
+			| (BitDepth::Sixteen, ColorType::Indexed) => unreachable!(),
+		}
+
+		self.header.bit_depth = BitDepth::Eight;
+		self.header.color_type = ColorType::Rgba;
+		Ok(())
 	}
 }
 
@@ -696,8 +842,42 @@ pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::
 
 	let width = u32::from_be_bytes([ihdr[8], ihdr[9], ihdr[10], ihdr[11]]);
 	let height = u32::from_be_bytes([ihdr[12], ihdr[13], ihdr[14], ihdr[15]]);
+	if width == 0 || height == 0 || width > 0x7FFF_FFFF || height > 0x7FFF_FFFF {
+		return Err(Error::BadIhdr);
+	}
+
+	// worst-case scenario this is a RGBA 16bpc image
+	// we could do a tighter check here but whatever
+	//   on 32-bit this is only relevant for, like, >23000x23000 images
+	if usize::try_from(width + 1)
+		.ok()
+		.and_then(|x| {
+			usize::try_from(height)
+				.ok()
+				.and_then(|y| x.checked_mul(8).and_then(|c| c.checked_mul(y)))
+		})
+		.is_none()
+	{
+		return Err(Error::TooLargeForUsize);
+	}
+
 	let bit_depth = BitDepth::from_byte(ihdr[16]).ok_or(Error::BadIhdr)?;
 	let color_type = ColorType::from_byte(ihdr[17]).ok_or(Error::BadIhdr)?;
+	match (bit_depth, color_type) {
+		(BitDepth::One | BitDepth::Two | BitDepth::Four, ColorType::Indexed | ColorType::Gray) => {}
+		(
+			BitDepth::One | BitDepth::Two | BitDepth::Four,
+			ColorType::Rgb | ColorType::Rgba | ColorType::GrayAlpha,
+		)
+		| (BitDepth::Sixteen, ColorType::Indexed) => {
+			return Err(Error::BadIhdr);
+		}
+		(BitDepth::Eight, _) => {}
+		(
+			BitDepth::Sixteen,
+			ColorType::Rgb | ColorType::Rgba | ColorType::Gray | ColorType::GrayAlpha,
+		) => {}
+	}
 	let compression = ihdr[18];
 	let filter = ihdr[19];
 	let interlace = ihdr[20];
@@ -714,9 +894,6 @@ pub fn read_png_header<R: Read>(reader: &mut R) -> Result<ImageHeader, Error<R::
 		bit_depth,
 		color_type,
 	};
-	if hdr.checked_required_bytes().is_none() {
-		return Err(Error::TooLargeForUsize);
-	}
 	Ok(hdr)
 }
 
@@ -1134,6 +1311,34 @@ pub fn read_png<'a, R: Read>(
 		&mut writer,
 	)?;
 
+	if header.color_type == ColorType::Gray {
+		// set palette appropriately so that conversion functions don't have
+		// to deal with grayscale/indexed <8bpp separately.
+		match header.bit_depth {
+			BitDepth::One => {
+				palette[0] = [0, 0, 0, 255];
+				palette[1] = [255, 255, 255, 255];
+			}
+			BitDepth::Two => {
+				#[allow(clippy::needless_range_loop)]
+				// clippy's suggestion here is more unreadable imo
+				for i in 0..4 {
+					let v = (255 * i / 3) as u8;
+					palette[i] = [v, v, v, 255];
+				}
+			}
+			BitDepth::Four =>
+			{
+				#[allow(clippy::needless_range_loop)]
+				for i in 0..16 {
+					let v = (255 * i / 15) as u8;
+					palette[i] = [v, v, v, 255];
+				}
+			}
+			BitDepth::Eight | BitDepth::Sixteen => {}
+		}
+	}
+
 	let buf = writer.slice;
 	apply_filters(&header, buf)?;
 	Ok(ImageData {
@@ -1150,6 +1355,13 @@ mod tests {
 	use std::fs::File;
 	extern crate alloc;
 
+	fn assert_eq_bytes(bytes1: &[u8], bytes2: &[u8]) {
+		assert_eq!(bytes1.len(), bytes2.len());
+		for i in 0..bytes1.len() {
+			assert_eq!(bytes1[i], bytes2[i]);
+		}
+	}
+
 	#[cfg(feature = "std")]
 	fn test_file(path: &str) {
 		let decoder = png::Decoder::new(File::open(path).expect("file not found"));
@@ -1165,11 +1377,10 @@ mod tests {
 		let image = read_png(&mut r, Some(&tiny_header), &mut tiny_buf).unwrap();
 		let tiny_bytes = image.pixels();
 
-		assert_eq!(png_bytes.len(), tiny_bytes.len());
-		assert_eq!(png_bytes, tiny_bytes);
+		assert_eq_bytes(png_bytes, tiny_bytes);
 	}
 
-	fn test_bytes(mut bytes: &[u8]) {
+	fn test_bytes(bytes: &[u8]) {
 		let decoder = png::Decoder::new(bytes);
 		let mut reader = decoder.read_info().unwrap();
 
@@ -1177,13 +1388,17 @@ mod tests {
 		let png_header = reader.next_frame(&mut png_buf).unwrap();
 		let png_bytes = &png_buf[..png_header.buffer_size()];
 
-		let tiny_header = read_png_header(&mut bytes).unwrap();
-		let mut tiny_buf = alloc::vec![0; tiny_header.required_bytes()];
-		let image = read_png(&mut bytes, Some(&tiny_header), &mut tiny_buf).unwrap();
+		let mut p = bytes;
+		let tiny_header = read_png_header(&mut p).unwrap();
+		let mut tiny_buf = alloc::vec![0; tiny_header.required_bytes_rgba8bpc()];
+		let mut image = read_png(&mut p, Some(&tiny_header), &mut tiny_buf).unwrap();
+		assert!(p.is_empty());
 		let tiny_bytes = image.pixels();
+		assert_eq_bytes(png_bytes, tiny_bytes);
 
-		assert_eq!(png_bytes.len(), tiny_bytes.len());
-		assert_eq!(png_bytes, tiny_bytes);
+		let (_, data) = png_decoder::decode(bytes).unwrap();
+		image.convert_to_rgba8bpc().unwrap();
+		assert_eq_bytes(&data[..], image.pixels());
 	}
 
 	macro_rules! test_both {
