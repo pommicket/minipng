@@ -537,24 +537,25 @@ impl HuffmanTable {
 		if length <= HUFFMAN_MAIN_TABLE_BITS {
 			// just throw it in the main table
 			for i in 0..1u16 << (HUFFMAN_MAIN_TABLE_BITS - length) {
-				self.main_table[usize::from(i << length | code)] = value | u16::from(length) << 10;
+				self.main_table[usize::from(i << length | code)] = value | u16::from(length) << 9;
 			}
 		} else {
 			// put it in a subtable.
 			let main_table_entry = usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1);
 			let subtable_index = if self.main_table[main_table_entry] == 0 {
 				let i = self.subtables_used;
-				self.main_table[main_table_entry] = 0x200 | i;
+				self.main_table[main_table_entry] = 0x8000 | i;
 				self.subtables_used += 1;
 				i
 			} else {
-				self.main_table[main_table_entry] & 0x1ff
+				debug_assert_ne!(self.main_table[main_table_entry] & 0x8000, 0);
+				self.main_table[main_table_entry] & 0x7fff
 			};
 			let subtable = &mut self.subtables[usize::from(subtable_index)];
 			for i in 0..1u16 << (HUFFMAN_MAX_BITS - length) {
 				subtable[usize::from(
 					i << (length - HUFFMAN_MAIN_TABLE_BITS) | code >> HUFFMAN_MAIN_TABLE_BITS,
-				)] = value | u16::from(length) << 10;
+				)] = value | u16::from(length) << 9;
 			}
 		}
 	}
@@ -582,12 +583,13 @@ impl HuffmanTable {
 	fn read_value<R: Read>(&self, reader: &mut BitReader<'_, R>) -> Result<u16, Error<R::Error>> {
 		let code = reader.peek_bits(HUFFMAN_MAX_BITS)? as u16;
 		let entry = self.main_table[usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1)];
-		let entry = if (entry & 0x200) == 0 {
+		let entry = if (entry & 0x8000) == 0 {
 			entry
 		} else {
-			self.subtables[usize::from(entry & 0x1ff)][usize::from(code >> HUFFMAN_MAIN_TABLE_BITS)]
+			self.subtables[usize::from(entry & 0x7fff)]
+				[usize::from(code >> HUFFMAN_MAIN_TABLE_BITS)]
 		};
-		let length = (entry >> 10) as u8;
+		let length = (entry >> 9) as u8;
 		if length == 0 {
 			return Err(Error::BadCode);
 		}
