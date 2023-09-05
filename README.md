@@ -4,7 +4,7 @@ Tiny Rust PNG decoder.
 
 This decoder can be used without `std` or `alloc` by disabling the `std` feature (enabled by default).
 
-Also it has tiny code size (e.g. 5x smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
+Also it has tiny code size (e.g. &gt;8x smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
 
 ## Goals
 
@@ -18,7 +18,7 @@ Also it has tiny code size (e.g. 5x smaller `.wasm.gz` size compared to the `png
 ## Non-goals
 
 - Adam7 interlacing (increases code complexity and interlaced PNGs are rare anyways)
-- Significantly sacrificing code size for speed (except maybe with a feature enabled)
+- Significantly sacrificing code size/complexity for speed
 - Checking block CRCs (increases code complexity
   and there’s already Adler32 checksums for IDAT chunks)
 

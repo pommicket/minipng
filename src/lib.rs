@@ -772,7 +772,7 @@ impl ImageData<'_> {
 				let mut dest = 4 * area;
 				let mut src = area;
 				for _ in 0..area {
-					let index: usize = buffer[src].into();
+					let index: usize = buffer[src - 1].into();
 					buffer[dest - 4..dest].copy_from_slice(&palette[index]);
 					dest -= 4;
 					src -= 1;
@@ -794,8 +794,10 @@ impl ImageData<'_> {
 							src_bit = 8;
 						}
 						src_bit -= bit_depth;
-						let index: usize =
-							((buffer[src] >> src_bit) & ((1 << bit_depth) - 1)).into();
+						// NOTE: PNG uses most-significant-bit first, unlike everyone else in the world.
+						let index: usize = ((buffer[src] >> (8 - bit_depth - src_bit))
+							& ((1 << bit_depth) - 1))
+							.into();
 						buffer[dest - 4..dest].copy_from_slice(&palette[index]);
 						dest -= 4;
 					}
@@ -1265,7 +1267,7 @@ fn read_non_idat_chunks<R: Read>(
 			}
 			// checksum
 			reader.skip_bytes(4)?;
-		} else if chunk_type[0].is_ascii_lowercase() || &chunk_type == b"PLTE" {
+		} else if (chunk_type[0] & 0x20) != 0 || &chunk_type == b"PLTE" {
 			// non-essential chunk
 			reader.skip_bytes(chunk_len + 4)?;
 		} else {
@@ -1296,7 +1298,7 @@ pub fn read_png<'a, R: Read>(
 		return Err(Error::BufferTooSmall);
 	}
 	let mut writer = DecompressedDataWriter::from(buf);
-	let mut palette = [[0, 0, 0, 0]; 256];
+	let mut palette = [[0, 0, 0, 255]; 256];
 	let Some(idat_len) = read_non_idat_chunks(reader, &header, &mut palette)? else {
 		return Err(Error::NoIdat);
 	};
@@ -1418,6 +1420,18 @@ mod tests {
 	#[test]
 	fn test_small_rgb() {
 		test_both!("test/small_rgb.png");
+	}
+	#[test]
+	fn test_tiny1bpp_gray() {
+		test_both!("test/tiny-1bpp-gray.png");
+	}
+	#[test]
+	fn test_tiny2bpp() {
+		test_both!("test/tiny-2bpp.png");
+	}
+	#[test]
+	fn test_tiny_plte8bpp() {
+		test_both!("test/tinyplte-8bpp.png");
 	}
 	#[test]
 	fn test_gray_alpha() {
