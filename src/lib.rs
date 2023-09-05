@@ -549,6 +549,8 @@ impl HuffmanTable {
 			let increment = 1 << length;
 			let mut i = usize::from(code);
 			let entry = value as i16 | i16::from(length) << 9;
+			// we need to account for all the possible bits that could appear after the code
+			//  (since when we're decoding we read HUFFMAN_MAX_BITS bits regardless of the code length)
 			for _ in 0..1u16 << (HUFFMAN_MAIN_TABLE_BITS - length) {
 				self.main_table[i] = entry;
 				i += increment;
@@ -557,31 +559,20 @@ impl HuffmanTable {
 			// put it in the tree
 			let main_table_entry = usize::from(code) & (HUFFMAN_MAIN_TABLE_SIZE - 1);
 			let mut code = code >> HUFFMAN_MAIN_TABLE_BITS;
-			let mut node = (code & 1) as i16
-				+ if self.main_table[main_table_entry] == 0 {
+			let mut entry = &mut self.main_table[main_table_entry];
+			for _ in 0..length - HUFFMAN_MAIN_TABLE_BITS {
+				if *entry == 0 {
 					let i = self.tree_used;
-					self.main_table[main_table_entry] = -i;
+					// allocate "left" and "right" branches of entry
 					self.tree_used += 2;
-					i
+					*entry = -i;
 				} else {
-					debug_assert!(self.main_table[main_table_entry] < 0);
-					-self.main_table[main_table_entry]
+					debug_assert!(*entry < 0);
 				};
-			code >>= 1;
-			for _ in 0..length - 1 - HUFFMAN_MAIN_TABLE_BITS {
-				node = (code & 1) as i16
-					+ if self.tree[node as usize] == 0 {
-						let i = self.tree_used;
-						self.tree[node as usize] = -i;
-						self.tree_used += 2;
-						i
-					} else {
-						debug_assert!(self.tree[node as usize] < 0);
-						-self.tree[node as usize]
-					};
+				entry = &mut self.tree[usize::from((-*entry) as u16 + (code & 1))];
 				code >>= 1;
 			}
-			self.tree[node as usize] = value as i16 | i16::from(length) << 9;
+			*entry = value as i16 | i16::from(length) << 9;
 		}
 	}
 
