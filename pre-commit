@@ -3,4 +3,4 @@
 cd $(git rev-parse --show-toplevel)
 cargo fmt || exit 1
 cargo clippy -- -D warnings || exit 1
-git add -u src
+git add -u src benches test examples

@@ -506,7 +506,7 @@ impl<'a> DecompressedDataWriter<'a> {
 
 const HUFFMAN_MAX_CODES: usize = 286;
 const HUFFMAN_MAX_BITS: u8 = 15;
-const HUFFMAN_MAIN_TABLE_BITS: u8 = 11;
+const HUFFMAN_MAIN_TABLE_BITS: u8 = 10;
 const HUFFMAN_MAIN_TABLE_SIZE: usize = 1 << HUFFMAN_MAIN_TABLE_BITS;
 const HUFFMAN_SUBTABLE_SIZE: usize = 1 << (HUFFMAN_MAX_BITS - HUFFMAN_MAIN_TABLE_BITS);
 #[derive(Debug)]

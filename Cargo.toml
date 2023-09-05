@@ -3,12 +3,15 @@ name = "tiny-png"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
-
 [dev-dependencies]
+criterion = { version = "0.5.1", features = ["html_reports"] }
 png = "0.17.10"
 
 [features]
 default = ["std"]
 std = []
 adler = []
+
+[[bench]]
+name = "bench"
+harness = false
