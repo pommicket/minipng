@@ -9,8 +9,7 @@ png = "0.17.10"
 png-decoder = "0.1.1"
 
 [features]
-default = ["std"]
-std = []
+default = []
 adler = []
 
 [[bench]]

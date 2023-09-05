@@ -7,7 +7,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-tiny-png = { path = "../..", default-features = false }
+tiny-png = { path = "../.." }
 
 [profile.release]
 opt-level = "z"

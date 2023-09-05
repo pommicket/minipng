@@ -11,9 +11,9 @@ fn run_benches(c: &mut Criterion) {
 	group.bench_function("tiny-png", |b| {
 		b.iter(|| {
 			let png = &large_image[..];
-			let header = tiny_png::read_png_header(png).unwrap();
+			let header = tiny_png::decode_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::read_png(png, &mut buf).unwrap();
+			let data = tiny_png::decode_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		})
 	});
@@ -35,9 +35,9 @@ fn run_benches(c: &mut Criterion) {
 	group.bench_function("tiny-png", |b| {
 		b.iter(|| {
 			let png = &small_image[..];
-			let header = tiny_png::read_png_header(png).unwrap();
+			let header = tiny_png::decode_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::read_png(png, &mut buf).unwrap();
+			let data = tiny_png::decode_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		})
 	});

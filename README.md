@@ -1,10 +1,8 @@
 ## tiny-png
 
-Tiny Rust PNG decoder.
+Tiny Rust PNG decoder with no dependencies (not even `std` or `alloc`).
 
-This decoder can be used without `std` or `alloc` by disabling the `std` feature (enabled by default).
-
-Also it has tiny code size (e.g. &gt;8x smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
+Also it has tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
 
 ## Goals
 
@@ -13,7 +11,7 @@ Also it has tiny code size (e.g. &gt;8x smaller `.wasm.gz` size compared to the 
 - Small code size &amp; complexity
 - No dependencies other than `core`
 - No panics
-- Minimal if any unsafe code
+- Minimal unsafe code
 
 ## Non-goals
 
@@ -21,6 +19,7 @@ Also it has tiny code size (e.g. &gt;8x smaller `.wasm.gz` size compared to the 
 - Significantly sacrificing code size/complexity for speed
 - Checking block CRCs (increases code complexity
   and there’s already Adler32 checksums for IDAT chunks)
+- ancillary chunks (tEXt, iCCP, etc.)
 
 ## Example usage
 
@@ -28,23 +27,22 @@ Basic usage:
 
 ```rust
 let mut buffer = vec![0; 1 << 20]; // hope this is big enough!
-let mut png = &include_bytes!("../examples/image.png")[..];
-let image = tiny_png::read_png(&mut png, None, &mut buffer).expect("bad PNG");
+let png = &include_bytes!("../examples/image.png")[..];
+let image = tiny_png::decode_png(png, &mut buffer).expect("bad PNG");
 println!("{}×{} image", image.width(), image.height());
 let pixels = image.pixels();
 println!("top-left pixel is #{:02x}{:02x}{:02x}", pixels[0], pixels[1], pixels[2]);
-// (^ this only makes sense for RGB 8bpc images)
+// (^ this only works for RGB(A) 8bpc images)
 ```
 
-More complex example that allocates the right number of bytes:
+More complex example that allocates the right number of bytes and handles all color formats:
 
 ```rust
-let mut png = &include_bytes!("../examples/image.png")[..];
-let header = tiny_png::read_png_header(&mut png).expect("bad PNG");
+let png = &include_bytes!("../examples/image.png")[..];
+let header = tiny_png::decode_png_header(png).expect("bad PNG");
 let mut buffer = vec![0; header.required_bytes_rgba8bpc()];
-let mut image = tiny_png::read_png(&mut png, Some(&header), &mut buffer).expect("bad PNG");
+let mut image = tiny_png::decode_png(png, &mut buffer).expect("bad PNG");
 image.convert_to_rgba8bpc();
-assert!(png.is_empty(), "extra data after PNG image end");
 println!("{}×{} image", image.width(), image.height());
 let pixels = image.pixels();
 println!("top-left pixel is #{:02x}{:02x}{:02x}{:02x}", pixels[0], pixels[1], pixels[2], pixels[3]);
@@ -52,8 +50,6 @@ println!("top-left pixel is #{:02x}{:02x}{:02x}{:02x}", pixels[0], pixels[1], pi
 
 ## Features
 
-- `std` (default: enabled) — use standard library. enabling it allows you to read from `BufReader<File>` but
-   adds `std` as a dependency.
 - `adler` (default: disabled) — check Adler-32 checksums. slightly increases code size and
   slightly decreases performance but verifies integrity of PNG files.
 
