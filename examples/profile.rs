@@ -11,9 +11,9 @@ fn main() {
 
 		for _ in 0..100 {
 			let png = &large_image[..];
-			let header = tiny_png::decode_png_header(png).unwrap();
+			let header = minipng::decode_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::decode_png(png, &mut buf).unwrap();
+			let data = minipng::decode_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		}
 	}

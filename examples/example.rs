@@ -1,9 +1,9 @@
 fn main() {
 	let png = &include_bytes!("image.png")[..];
-	let header = tiny_png::decode_png_header(png).expect("bad PNG");
+	let header = minipng::decode_png_header(png).expect("bad PNG");
 	println!("need {} bytes of memory", header.required_bytes());
 	let mut buffer = vec![0; header.required_bytes()];
-	let image = tiny_png::decode_png(png, &mut buffer).expect("bad PNG");
+	let image = minipng::decode_png(png, &mut buffer).expect("bad PNG");
 	println!("{}×{} image", image.width(), image.height());
 	let pixels = image.pixels();
 	println!(

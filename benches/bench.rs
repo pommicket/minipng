@@ -8,12 +8,12 @@ fn run_benches(c: &mut Criterion) {
 	let mut group = c.benchmark_group("large-image");
 	group.sample_size(50);
 
-	group.bench_function("tiny-png", |b| {
+	group.bench_function("minipng", |b| {
 		b.iter(|| {
 			let png = &large_image[..];
-			let header = tiny_png::decode_png_header(png).unwrap();
+			let header = minipng::decode_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::decode_png(png, &mut buf).unwrap();
+			let data = minipng::decode_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		})
 	});
@@ -32,12 +32,12 @@ fn run_benches(c: &mut Criterion) {
 
 	let mut group = c.benchmark_group("small-image");
 	group.sample_size(1000);
-	group.bench_function("tiny-png", |b| {
+	group.bench_function("minipng", |b| {
 		b.iter(|| {
 			let png = &small_image[..];
-			let header = tiny_png::decode_png_header(png).unwrap();
+			let header = minipng::decode_png_header(png).unwrap();
 			let mut buf = vec![0; header.required_bytes()];
-			let data = tiny_png::decode_png(png, &mut buf).unwrap();
+			let data = minipng::decode_png(png, &mut buf).unwrap();
 			std::hint::black_box(data);
 		})
 	});

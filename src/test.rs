@@ -29,16 +29,16 @@ fn test_bytes(bytes: &[u8]) -> Result<(), Flaw> {
 		if let Ok(png_header) = reader.next_frame(&mut png_buf) {
 			let png_bytes = &png_buf[..png_header.buffer_size()];
 
-			let tiny_header = match decode_png_header(bytes) {
+			let mini_header = match decode_png_header(bytes) {
 				Ok(h) => h,
 				Err(Error::UnsupportedInterlace) => return Ok(()),
 				Err(_) => return Err(Flaw::ErrorFromValidPNG),
 			};
-			let mut tiny_buf = vec![0; tiny_header.required_bytes_rgba8bpc()];
+			let mut mini_buf = vec![0; mini_header.required_bytes_rgba8bpc()];
 			let mut image =
-				decode_png(bytes, &mut tiny_buf).map_err(|_| Flaw::ErrorFromValidPNG)?;
-			let tiny_bytes = image.pixels();
-			if png_bytes != tiny_bytes {
+				decode_png(bytes, &mut mini_buf).map_err(|_| Flaw::ErrorFromValidPNG)?;
+			let mini_bytes = image.pixels();
+			if png_bytes != mini_bytes {
 				return Err(Flaw::DecodedMismatch);
 			}
 			let (_, mut data) = png_decoder::decode(bytes).unwrap();

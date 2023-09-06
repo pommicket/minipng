@@ -1,5 +1,10 @@
 [package]
-name = "tiny-png"
+name = "minipng"
+description = "Tiny PNG decoder with no dependencies"
+repository = "https://github.com/pommicket/minipng"
+categories = ["encoding", "graphics", "multimedia::images", "no-std::no-alloc"]
+keywords = ["png", "decoder", "image", "no_std", "no_alloc"]
+license = "0BSD"
 version = "0.1.0"
 edition = "2021"
 

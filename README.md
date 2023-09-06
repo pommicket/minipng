@@ -1,4 +1,6 @@
-## tiny-png
+## minipng
+
+[crates.io page](https://crates.io/crates/minipng) &middot; [repository](https://github.com/pommicket/minipng)
 
 Tiny Rust PNG decoder with no dependencies (not even `std` or `alloc`)
 and tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
@@ -15,11 +17,12 @@ and tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to the `pn
 ## Non-goals
 
 - Adam7 interlacing (increases code complexity and interlaced PNGs are rare anyways)
-- Significantly sacrificing code size/complexity for speed
-- Checking block CRCs (increases code complexity
+- significantly sacrificing code size/complexity for speed
+- checking block CRCs (increases code complexity
   and there’s already Adler32 checksums for IDAT chunks)
 - ancillary chunks (tEXt, iCCP, etc.)
 - correctly handling non-indexed image with tRNS chunk (who uses this?)
+- animated PNGs
 
 ## Example usage
 
@@ -28,7 +31,7 @@ Basic usage:
 ```rust
 let mut buffer = vec![0; 1 << 20]; // hope this is big enough!
 let png = &include_bytes!("../examples/image.png")[..];
-let image = tiny_png::decode_png(png, &mut buffer).expect("bad PNG");
+let image = minipng::decode_png(png, &mut buffer).expect("bad PNG");
 println!("{}×{} image", image.width(), image.height());
 let pixels = image.pixels();
 println!("top-left pixel is #{:02x}{:02x}{:02x}", pixels[0], pixels[1], pixels[2]);
@@ -39,9 +42,9 @@ More complex example that allocates the right number of bytes and handles all co
 
 ```rust
 let png = &include_bytes!("../examples/image.png")[..];
-let header = tiny_png::decode_png_header(png).expect("bad PNG");
+let header = minipng::decode_png_header(png).expect("bad PNG");
 let mut buffer = vec![0; header.required_bytes_rgba8bpc()];
-let mut image = tiny_png::decode_png(png, &mut buffer).expect("bad PNG");
+let mut image = minipng::decode_png(png, &mut buffer).expect("bad PNG");
 image.convert_to_rgba8bpc();
 println!("{}×{} image", image.width(), image.height());
 let pixels = image.pixels();
@@ -69,7 +72,7 @@ tests and no way of enabling `--nocapture` by default *grumble grumble*).
 
 ## Performance
 
-Benchmarks (see `cargo bench`) show that `tiny-png` is about 50% slower than the `png` crate
+Benchmarks (see `cargo bench`) show that `minipng` is about 50% slower than the `png` crate
 for large images, but faster than `png` for small images.
 
 ## License
