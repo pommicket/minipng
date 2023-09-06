@@ -1,8 +1,7 @@
 ## tiny-png
 
-Tiny Rust PNG decoder with no dependencies (not even `std` or `alloc`).
-
-Also it has tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
+Tiny Rust PNG decoder with no dependencies (not even `std` or `alloc`)
+and tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to the `png` crate — see `check-size.sh`).
 
 ## Goals
 
@@ -70,7 +69,7 @@ tests and no way of enabling `--nocapture` by default *grumble grumble*).
 
 ## Performance
 
-Benchmarks (see `cargo bench`) show that `tiny-png` is about 50% slower than `png`
+Benchmarks (see `cargo bench`) show that `tiny-png` is about 50% slower than the `png` crate
 for large images, but faster than `png` for small images.
 
 ## License
