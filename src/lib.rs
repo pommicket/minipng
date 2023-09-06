@@ -1,9 +1,12 @@
-#![no_std]
+#![cfg_attr(not(test), no_std)]
 #![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 use core::cmp::{max, min};
 use core::fmt::{self, Debug, Display};
+
+#[cfg(test)]
+mod test;
 
 /// decoding error
 #[derive(Debug)]
@@ -663,7 +666,7 @@ impl ImageData<'_> {
 					buffer[dest] = buffer[src];
 					buffer[dest + 1] = buffer[src + 2];
 					buffer[dest + 2] = buffer[src + 4];
-					buffer[dest + 3] = buffer[src + 8];
+					buffer[dest + 3] = buffer[src + 6];
 					dest += 4;
 					src += 8;
 				}
@@ -789,7 +792,11 @@ pub fn decode_png_header(bytes: &[u8]) -> Result<ImageHeader> {
 	}
 	let mut ihdr = [0; 25];
 	reader.read_exact(&mut ihdr)?;
-	let ihdr_len = (u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]) + 12) as usize;
+	let ihdr_len = u32::from_be_bytes([ihdr[0], ihdr[1], ihdr[2], ihdr[3]]);
+	if ihdr_len > 0x7FFF_FFFF {
+		return Err(Error::BadIhdr);
+	}
+	let ihdr_len = (ihdr_len + 12) as usize; // include chunk type, length, CRC
 	if &ihdr[4..8] != b"IHDR" || ihdr_len < ihdr.len() {
 		return Err(Error::BadIhdr);
 	}
@@ -1301,156 +1308,4 @@ pub fn decode_png<'a>(bytes: &[u8], buf: &'a mut [u8]) -> Result<ImageData<'a>> 
 		header,
 		palette,
 	})
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-	extern crate alloc;
-
-	fn assert_eq_bytes(bytes1: &[u8], bytes2: &[u8]) {
-		assert_eq!(bytes1.len(), bytes2.len());
-		for i in 0..bytes1.len() {
-			assert_eq!(bytes1[i], bytes2[i]);
-		}
-	}
-
-	fn test_bytes(bytes: &[u8]) {
-		let decoder = png::Decoder::new(bytes);
-		let mut reader = decoder.read_info().unwrap();
-
-		let mut png_buf = alloc::vec![0; reader.output_buffer_size()];
-		let png_header = reader.next_frame(&mut png_buf).unwrap();
-		let png_bytes = &png_buf[..png_header.buffer_size()];
-
-		let tiny_header = decode_png_header(bytes).unwrap();
-		let mut tiny_buf = alloc::vec![0; tiny_header.required_bytes_rgba8bpc()];
-		let mut image = decode_png(bytes, &mut tiny_buf).unwrap();
-		let tiny_bytes = image.pixels();
-		assert_eq_bytes(png_bytes, tiny_bytes);
-
-		let (_, data) = png_decoder::decode(bytes).unwrap();
-		image.convert_to_rgba8bpc().unwrap();
-		assert_eq_bytes(&data[..], image.pixels());
-	}
-
-	macro_rules! test {
-		($file:literal) => {
-			test_bytes(include_bytes!(concat!("../", $file)));
-		};
-	}
-
-	#[test]
-	fn test_small() {
-		test!("test/small.png");
-	}
-	#[test]
-	fn test_small_rgb() {
-		test!("test/small_rgb.png");
-	}
-	#[test]
-	fn test_tiny1bpp_gray() {
-		test!("test/tiny-1bpp-gray.png");
-	}
-	#[test]
-	fn test_tiny2bpp() {
-		test!("test/tiny-2bpp.png");
-	}
-	#[test]
-	fn test_tiny_plte8bpp() {
-		test!("test/tinyplte-8bpp.png");
-	}
-	#[test]
-	fn test_gray_alpha() {
-		test!("test/gray_alpha.png");
-	}
-	#[test]
-	fn test_earth0() {
-		test!("test/earth0.png");
-	}
-	#[test]
-	fn test_earth9() {
-		test!("test/earth9.png");
-	}
-	#[test]
-	fn test_photograph() {
-		test!("test/photograph.png");
-	}
-	#[test]
-	fn test_earth_palette() {
-		test!("test/earth_palette.png");
-	}
-	#[test]
-	fn test_württemberg() {
-		test!("test/württemberg.png");
-	}
-	#[test]
-	fn test_endsleigh() {
-		test!("test/endsleigh.png");
-	}
-	#[test]
-	fn test_1qps() {
-		test!("test/1QPS.png");
-	}
-	#[test]
-	fn test_rabbit() {
-		test!("test/rabbit.png");
-	}
-	#[test]
-	fn test_basketball() {
-		test!("test/basketball.png");
-	}
-	#[test]
-	fn test_triangle() {
-		test!("test/triangle.png");
-	}
-	#[test]
-	fn test_iroquois() {
-		test!("test/iroquois.png");
-	}
-	#[test]
-	fn test_canada() {
-		test!("test/canada.png");
-	}
-	#[test]
-	fn test_berry() {
-		test!("test/berry.png");
-	}
-	#[test]
-	fn test_adam() {
-		test!("test/adam.png");
-	}
-	#[test]
-	fn test_nightingale() {
-		test!("test/nightingale.png");
-	}
-	#[test]
-	fn test_ratatoskr() {
-		test!("test/ratatoskr.png");
-	}
-	#[test]
-	fn test_cheerios() {
-		test!("test/cheerios.png");
-	}
-	#[test]
-	fn test_cavendish() {
-		test!("test/cavendish.png");
-	}
-	#[test]
-	fn test_ouroboros() {
-		test!("test/ouroboros.png");
-	}
-	#[test]
-	fn test_bad_png() {
-		let mut data = &b"hello"[..];
-		let err = decode_png_header(&mut data).unwrap_err();
-		assert!(matches!(err, Error::NotPng));
-	}
-	#[test]
-	fn test_buffer_too_small() {
-		let png = &include_bytes!("../test/ouroboros.png")[..];
-		let mut buffer = [0; 128];
-		let err = decode_png(png, &mut buffer[..]).unwrap_err();
-		assert!(matches!(err, Error::BufferTooSmall));
-	}
 }

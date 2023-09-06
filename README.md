@@ -20,6 +20,7 @@ Also it has tiny code size (e.g. &gt;8 times smaller `.wasm.gz` size compared to
 - Checking block CRCs (increases code complexity
   and there’s already Adler32 checksums for IDAT chunks)
 - ancillary chunks (tEXt, iCCP, etc.)
+- correctly handling non-indexed image with tRNS chunk (who uses this?)
 
 ## Example usage
 
@@ -61,6 +62,12 @@ A `pre-commit` git hook is provided to run `cargo fmt` and `cargo clippy`. You c
 ln -s ../../pre-commit .git/hooks/
 ```
 
+## Testing
+
+All PNG files in the `test` directory are tested by `cargo t` (NOTE: `cargo test`
+doesn‘t log as much progress because there’s no way of dynamically generating
+tests and no way of enabling `--nocapture` by default *grumble grumble*).
+
 ## Performance
 
 Benchmarks (see `cargo bench`) show that `tiny-png` is about 50% slower than `png`
@@ -81,4 +88,3 @@ for large images, but faster than `png` for small images.
 > AN ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
 > OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
-(Note: all the test PNG images are either in the U.S. public domain or CC0-licensed.)
