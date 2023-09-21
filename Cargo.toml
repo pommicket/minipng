@@ -6,7 +6,7 @@ categories = ["encoding", "graphics", "multimedia::images", "no-std::no-alloc"]
 keywords = ["png", "decoder", "image", "no_std", "no_alloc"]
 exclude = ["/test/large", "/benches/large.png"]
 license = "0BSD"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 
 [dev-dependencies]

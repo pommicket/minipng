@@ -53,6 +53,10 @@ pub enum Error {
 	NoIdat,
 	/// Adler-32 checksum doesn't check out (invalid PNG file)
 	BadAdlerChecksum,
+	/// e.g. chunk is larger than 2GB, chunk goes past end of file (invalid PNG)
+	BadChunkSize,
+	/// compressed data cannot possibly be expanded to the full image because it's too small (invalid PNG)
+	CompressedSizeTooSmall,
 }
 
 #[cold]
@@ -86,6 +90,8 @@ impl Display for Error {
 			Self::NoIdat => write!(f, "missing IDAT chunk"),
 			Self::BadNlen => write!(f, "LEN doesn't match NLEN"),
 			Self::BadAdlerChecksum => write!(f, "bad adler-32 checksum"),
+			Self::BadChunkSize => write!(f, "bad chunk size"),
+			Self::CompressedSizeTooSmall => write!(f, "compressed data too small"),
 		}
 	}
 }
@@ -857,6 +863,11 @@ pub fn decode_png_header(bytes: &[u8]) -> Result<ImageHeader> {
 		color_type,
 		length: 8 + ihdr_len,
 	};
+	// in the best-case scenario, each bit can decompress to 258 bytes
+	//   (see DEFLATE RFC especially §3.2.5).
+	if hdr.decompressed_size() / (8 * 258) > bytes.len() {
+		return Err(Error::CompressedSizeTooSmall);
+	}
 	Ok(hdr)
 }
 
@@ -1215,6 +1226,9 @@ fn read_non_idat_chunks(
 		])
 		.try_into()
 		.map_err(|_| Error::TooLargeForUsize)?;
+		if chunk_len > 0x7FFF_FFFF || chunk_len > reader.0.len() {
+			return Err(Error::BadChunkSize);
+		}
 		let chunk_type = [
 			chunk_header[4],
 			chunk_header[5],
